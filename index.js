@@ -21,14 +21,19 @@
  * 断网行为:提交/轮询自动重试(3 次指数退避),3 次都连不上才报错;
  * ST 侧中断(停止按钮)→ 扩展发 cancel,不浪费上游额度。
  */
-import { extension_settings, renderExtensionTemplateAsync } from '../../extensions.js';
+import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../extensions.js';
 import { saveSettingsDebounced } from '../../../script.js';
-import { oai_settings, chat_completion_sources } from '../../openai.js';
+import { chat_completion_sources } from '../../openai.js';
 import { SECRET_KEYS, findSecret } from '../../secrets.js';
 
 const MODULE_NAME = 'st-catiecli-tasks';
 const GENERATE_URL = '/api/backends/chat-completions/generate';
 const DEFAULT_UPSTREAM = 'https://catiecli.sukaka.top';
+
+/** oai_settings 未从 openai.js 导出;官方扩展 API getContext().chatCompletionSettings 即它 */
+function getOaiSettings() {
+    return getContext()?.chatCompletionSettings ?? {};
+}
 
 // ===== 设置 =====
 const defaultSettings = {
@@ -63,7 +68,7 @@ function resolveUpstream() {
         return s.upstreamOverride.trim().replace(/\/+$/, '');
     }
     // custom_url 形如 https://catiecli.sukaka.top/v1(ST 后端会拼 /chat/completions)
-    const url = (oai_settings.custom_url || '').replace(/\/+$/, '');
+    const url = (getOaiSettings().custom_url || '').replace(/\/+$/, '');
     if (url) {
         return url.replace(/\/(v1|v1beta)$/i, '');
     }
@@ -195,7 +200,7 @@ function shouldIntercept(generateData) {
     const s = getSettings();
     if (!s.enabled) return false;
     // 仅接管 Custom (OpenAI-compatible) 源
-    if (oai_settings.chat_completion_source !== chat_completion_sources.CUSTOM) return false;
+    if (getOaiSettings().chat_completion_source !== chat_completion_sources.CUSTOM) return false;
     if (!generateData || typeof generateData !== 'object' || !generateData.model) return false;
     return true;
 }
