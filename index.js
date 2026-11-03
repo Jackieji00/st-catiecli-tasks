@@ -40,19 +40,31 @@ function getOaiSettings() {
 const defaultSettings = {
     enabled: false,              // 总开关:接管 Custom 源的生成请求
     apiKey: '',                  // cat- 密钥(扩展自存,不依赖 ST secret)
-    pollIntervalMs: 800,        // 常规轮询间隔
-    busyPollIntervalMs: 60,      // 有新分片时的快速跟进间隔(准流式)
+    pollIntervalMs: 2000,       // 常规轮询间隔(等待中,无新分片)
+    busyPollIntervalMs: 250,    // 有新分片时的快速跟进间隔(准流式)
     netRetryMax: 3,              // 网络错误重试次数
     netRetryBaseMs: 1000,        // 重试退避基数(1s→2s→4s)
     pollMaxMinutes: 30,          // 单任务最长轮询时间
     upstreamOverride: '',        // 留空用 Custom Endpoint;否则强制此地址
 };
 
+// 旧版本轮询间隔较高(800/60),升级时迁移到新默认,降低请求频率
+const LEGACY_SETTINGS = [
+    ['pollIntervalMs', 800, 2000],
+    ['busyPollIntervalMs', 60, 250],
+];
+
 function loadSettings() {
     extension_settings[MODULE_NAME] = extension_settings[MODULE_NAME] || {};
     for (const key of Object.keys(defaultSettings)) {
         if (extension_settings[MODULE_NAME][key] === undefined) {
             extension_settings[MODULE_NAME][key] = defaultSettings[key];
+        }
+    }
+    // 旧默认值迁移(用户手改过的值不受影响)
+    for (const [key, oldValue, newValue] of LEGACY_SETTINGS) {
+        if (extension_settings[MODULE_NAME][key] === oldValue) {
+            extension_settings[MODULE_NAME][key] = newValue;
         }
     }
 }
