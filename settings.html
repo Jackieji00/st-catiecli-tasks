@@ -11,7 +11,10 @@
                     <span>接管 Custom (OpenAI 兼容) 源的生成请求(任务 API 模式)</span>
                 </label>
                 <span class="flex-basis100">留空跟随 Custom Endpoint;或强制指定上游地址:</span>
-                <input id="catiecli_tasks_upstream" type="text" class="text_pole" placeholder="https://catiecli.sukaka.top">
+                <div class="flex-container">
+                    <input id="catiecli_tasks_upstream" type="text" class="text_pole flex1" placeholder="https://catiecli.sukaka.top">
+                    <i id="catiecli_tasks_save" class="menu_button fa-solid fa-save" title="保存上游地址"></i>
+                </div>
                 <span class="flex-basis100">
                     生成请求改为「提交任务 + 轮询分片」,断网/切后台不报废回复。
                     密钥复用 Custom 源的 API 密钥,无需另填。

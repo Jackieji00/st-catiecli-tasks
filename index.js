@@ -24,7 +24,7 @@
 // 相对路径注意:第三方扩展经 /scripts/extensions/third-party/<name>/ 提供,
 // 比内置扩展深一层,所以是 ../../../(内置扩展用 ../../)
 import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
-import { saveSettingsDebounced } from '../../../../script.js';
+import { saveSettings, saveSettingsDebounced } from '../../../../script.js';
 import { chat_completion_sources } from '../../../openai.js';
 import { SECRET_KEYS, findSecret } from '../../../secrets.js';
 
@@ -372,7 +372,14 @@ async function addSettingsPanel() {
     });
     $('#catiecli_tasks_upstream').val(s.upstreamOverride).on('input', function () {
         s.upstreamOverride = String($(this).val());
-        saveSettingsDebounced();
+    });
+    $('#catiecli_tasks_save').on('click', async function () {
+        s.upstreamOverride = String($('#catiecli_tasks_upstream').val());
+        await saveSettings();
+        const icon = $(this);
+        icon.addClass('fa-solid fa-check').removeClass('fa-save');
+        setTimeout(() => icon.addClass('fa-save').removeClass('fa-check'), 1500);
+        toastr.success('上游地址已保存', 'Catiecli Tasks');
     });
 }
 
