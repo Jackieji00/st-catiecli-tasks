@@ -36,35 +36,25 @@ function getOaiSettings() {
     return getContext()?.chatCompletionSettings ?? {};
 }
 
-// ===== 设置 =====
+// ===== 轮询节奏(代码内固定,非用户设置) =====
+const POLL_INTERVAL_MS = 2000;   // 常规轮询间隔(等待中,无新分片)
+const BUSY_POLL_INTERVAL_MS = 250; // 有新分片时的快速跟进间隔(准流式)
+const NET_RETRY_MAX = 3;         // 网络错误重试次数(3 次都连不上才报错)
+const NET_RETRY_BASE_MS = 1000;  // 重试退避基数(1s→2s→4s)
+const POLL_MAX_MINUTES = 30;     // 单任务最长轮询时间
+
+// ===== 设置(仅用户真正会改的东西) =====
 const defaultSettings = {
     enabled: false,              // 总开关:接管 Custom 源的生成请求
     apiKey: '',                  // cat- 密钥(扩展自存,不依赖 ST secret)
-    pollIntervalMs: 2000,       // 常规轮询间隔(等待中,无新分片)
-    busyPollIntervalMs: 250,    // 有新分片时的快速跟进间隔(准流式)
-    netRetryMax: 3,              // 网络错误重试次数
-    netRetryBaseMs: 1000,        // 重试退避基数(1s→2s→4s)
-    pollMaxMinutes: 30,          // 单任务最长轮询时间
     upstreamOverride: '',        // 留空用 Custom Endpoint;否则强制此地址
 };
-
-// 旧版本轮询间隔较高(800/60),升级时迁移到新默认,降低请求频率
-const LEGACY_SETTINGS = [
-    ['pollIntervalMs', 800, 2000],
-    ['busyPollIntervalMs', 60, 250],
-];
 
 function loadSettings() {
     extension_settings[MODULE_NAME] = extension_settings[MODULE_NAME] || {};
     for (const key of Object.keys(defaultSettings)) {
         if (extension_settings[MODULE_NAME][key] === undefined) {
             extension_settings[MODULE_NAME][key] = defaultSettings[key];
-        }
-    }
-    // 旧默认值迁移(用户手改过的值不受影响)
-    for (const [key, oldValue, newValue] of LEGACY_SETTINGS) {
-        if (extension_settings[MODULE_NAME][key] === oldValue) {
-            extension_settings[MODULE_NAME][key] = newValue;
         }
     }
 }
@@ -103,31 +93,31 @@ function isNetworkError(err) {
         .includes(err?.cause?.code);
 }
 
-async function withNetRetry(label, fn, settings) {
+async function withNetRetry(label, fn) {
     let lastErr = null;
-    for (let attempt = 1; attempt <= settings.netRetryMax; attempt++) {
+    for (let attempt = 1; attempt <= NET_RETRY_MAX; attempt++) {
         try {
             return await fn();
         } catch (err) {
             if (err instanceof Error && err.statusCode !== undefined) throw err; // HTTP 错误:透传
             if (!isNetworkError(err)) throw err;
             lastErr = err;
-            if (attempt < settings.netRetryMax) {
-                const delay = Math.min(settings.netRetryBaseMs * (2 ** (attempt - 1)), 8000);
-                console.warn(`[st-catiecli-tasks] ${label} 网络错误(第 ${attempt}/${settings.netRetryMax} 次),${delay / 1000}s 后重试: ${err.message}`);
+            if (attempt < NET_RETRY_MAX) {
+                const delay = Math.min(NET_RETRY_BASE_MS * (2 ** (attempt - 1)), 8000);
+                console.warn(`[st-catiecli-tasks] ${label} 网络错误(第 ${attempt}/${NET_RETRY_MAX} 次),${delay / 1000}s 后重试: ${err.message}`);
                 await new Promise(r => setTimeout(r, delay));
             }
         }
     }
     throw Object.assign(
-        new Error(`${label}: 连续 ${settings.netRetryMax} 次无法连接上游(${lastErr?.message ?? '网络错误'})`),
+        new Error(`${label}: 连续 ${NET_RETRY_MAX} 次无法连接上游(${lastErr?.message ?? '网络错误'})`),
         { statusCode: 502 },
     );
 }
 
 // ===== 任务 API 客户端 =====
 
-async function submitTask(upstream, apiKey, body, settings) {
+async function submitTask(upstream, apiKey, body) {
     return withNetRetry('任务提交', () => fetch(`${upstream}/v1/openai/tasks`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -140,10 +130,10 @@ async function submitTask(upstream, apiKey, body, settings) {
         const data = JSON.parse(text);
         if (!data?.id) throw new Error('任务提交未返回 task_id');
         return data.id;
-    }), settings);
+    }));
 }
 
-async function pollTask(upstream, apiKey, taskId, after, settings) {
+async function pollTask(upstream, apiKey, taskId, after) {
     return withNetRetry('任务轮询', () => fetch(`${upstream}/v1/openai/tasks/${encodeURIComponent(taskId)}?after=${after}`, {
         headers: { 'Authorization': `Bearer ${apiKey}` },
     }).then(async resp => {
@@ -152,7 +142,7 @@ async function pollTask(upstream, apiKey, taskId, after, settings) {
             throw Object.assign(new Error(`任务查询失败: ${resp.status} ${text.slice(0, 500)}`), { statusCode: resp.status });
         }
         return resp.json();
-    }), settings);
+    }));
 }
 
 async function cancelTask(upstream, apiKey, taskId) {
@@ -225,21 +215,21 @@ function envelopeToResponse(env) {
 }
 
 /** 流式:伪 SSE Response,分片推进 ReadableStream(准流式) */
-function streamTaskResponse(upstream, apiKey, taskId, settings, signal) {
+function streamTaskResponse(upstream, apiKey, taskId, signal) {
     const encoder = new TextEncoder();
 
     const stream = new ReadableStream({
         async start(controller) {
-            const deadline = Date.now() + settings.pollMaxMinutes * 60 * 1000;
+            const deadline = Date.now() + POLL_MAX_MINUTES * 60 * 1000;
             let after = 0;
             try {
-                let nextDelay = settings.pollIntervalMs;
+                let nextDelay = POLL_INTERVAL_MS;
                 while (Date.now() < deadline) {
                     if (signal?.aborted) break;
                     await new Promise(r => setTimeout(r, nextDelay));
                     if (signal?.aborted) break;
 
-                    const env = await pollTask(upstream, apiKey, taskId, after, settings);
+                    const env = await pollTask(upstream, apiKey, taskId, after);
                     for (const chunk of (env.chunks ?? [])) {
                         controller.enqueue(encoder.encode(chunk));
                     }
@@ -261,11 +251,11 @@ function streamTaskResponse(upstream, apiKey, taskId, settings, signal) {
                         break;
                     }
                     // 有新分片 → 快速跟进(准流式);否则常规节奏
-                    nextDelay = (env.chunks?.length ?? 0) > 0 ? settings.busyPollIntervalMs : settings.pollIntervalMs;
+                    nextDelay = (env.chunks?.length ?? 0) > 0 ? BUSY_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
                 }
                 if (Date.now() >= deadline && !signal?.aborted) {
                     await cancelTask(upstream, apiKey, taskId);
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: `任务 ${taskId} 超时(${settings.pollMaxMinutes} 分钟)`, code: 504 } })}\n\n`));
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: `任务 ${taskId} 超时(${POLL_MAX_MINUTES} 分钟)`, code: 504 } })}\n\n`));
                     controller.enqueue(encoder.encode('data: [DONE]\n\n'));
                 }
             } catch (err) {
@@ -296,35 +286,34 @@ function streamTaskResponse(upstream, apiKey, taskId, settings, signal) {
 
 /** 把 catiecli 任务跑成一个伪 Response(SSE 流或 JSON),接口与 ST 期望一致 */
 async function runTaskAsResponse(generateData, signal) {
-    const settings = getSettings();
     const upstream = resolveUpstream();
     const apiKey = await resolveApiKey();
     const requestBody = extractOpenAIBody(generateData);
 
-    const taskId = await submitTask(upstream, apiKey, requestBody, settings);
+    const taskId = await submitTask(upstream, apiKey, requestBody);
     console.info(`[st-catiecli-tasks] 任务已提交: ${taskId}(stream=${requestBody.stream})`);
 
     if (!requestBody.stream) {
         // 非流式:轮询到终态,返回伪 JSON Response
-        const deadline = Date.now() + settings.pollMaxMinutes * 60 * 1000;
+        const deadline = Date.now() + POLL_MAX_MINUTES * 60 * 1000;
         let after = 0;
         let env = null;
         while (Date.now() < deadline) {
             if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
-            await new Promise(r => setTimeout(r, settings.pollIntervalMs));
-            env = await pollTask(upstream, apiKey, taskId, after, settings);
+            await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+            env = await pollTask(upstream, apiKey, taskId, after);
             after = env.next_after ?? after;
             if (env.done) break;
             env = null;
         }
         if (!env) {
             await cancelTask(upstream, apiKey, taskId);
-            throw Object.assign(new Error(`任务 ${taskId} 超过 ${settings.pollMaxMinutes} 分钟未完成`), { statusCode: 504 });
+            throw Object.assign(new Error(`任务 ${taskId} 超过 ${POLL_MAX_MINUTES} 分钟未完成`), { statusCode: 504 });
         }
         return envelopeToResponse(env);
     }
 
-    return streamTaskResponse(upstream, apiKey, taskId, settings, signal);
+    return streamTaskResponse(upstream, apiKey, taskId, signal);
 }
 
 function installFetchPatch() {
