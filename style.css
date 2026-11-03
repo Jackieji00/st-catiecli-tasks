@@ -5,6 +5,36 @@
     gap: 8px;
 }
 
-#catiecli_tasks_settings input[type="text"] {
+#catiecli_tasks_settings input[type="text"],
+#catiecli_tasks_settings input[type="password"] {
     width: 100%;
+}
+
+/* 密钥区醒目:标签加色 + 输入框描边强调 */
+#catiecli_tasks_settings .catiecli-key-label {
+    color: #eaa61e;
+    font-size: 1.05em;
+    margin-bottom: -4px;
+}
+
+#catiecli_tasks_settings .catiecli-key-input {
+    border: 1px solid #eaa61e !important;
+    box-shadow: 0 0 6px rgba(234, 166, 30, 0.35);
+}
+
+/* 未保存密钥时输入框呼吸提醒 */
+#catiecli_tasks_settings .catiecli-key-input:not(.has-key) {
+    animation: catiecli-breathe 2.5s ease-in-out infinite;
+}
+
+@keyframes catiecli-breathe {
+    0%, 100% { box-shadow: 0 0 4px rgba(234, 166, 30, 0.25); }
+    50% { box-shadow: 0 0 10px rgba(234, 166, 30, 0.6); }
+}
+
+/* 已保存密钥:取消动画,给个安静的绿描边表示就绪 */
+#catiecli_tasks_settings .catiecli-key-input.has-key {
+    animation: none;
+    border-color: #4caf50 !important;
+    box-shadow: none;
 }

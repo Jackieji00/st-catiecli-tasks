@@ -369,10 +369,13 @@ async function addSettingsPanel() {
         toastr.info(s.enabled ? '已开启任务 API 接管' : '已关闭接管,恢复 ST 原生直连', 'Catiecli Tasks');
     });
 
-    // 密钥:显示/隐藏
-    $('#catiecli_tasks_key').val(s.apiKey).on('input', function () {
+    // 密钥:显示/隐藏;有值时输入框转绿、无值时呼吸提醒
+    const keyInput = $('#catiecli_tasks_key');
+    keyInput.val(s.apiKey).on('input', function () {
         s.apiKey = String($(this).val());
+        $(this).toggleClass('has-key', Boolean(s.apiKey?.trim()));
     });
+    keyInput.toggleClass('has-key', Boolean(s.apiKey?.trim()));
     $('#catiecli_tasks_key_toggle').on('click', function () {
         const input = $('#catiecli_tasks_key');
         const isPassword = input.attr('type') === 'password';
@@ -392,6 +395,7 @@ async function addSettingsPanel() {
     }
     bindSaveIcon('#catiecli_tasks_key_save', async () => {
         s.apiKey = String($('#catiecli_tasks_key').val());
+        $('#catiecli_tasks_key').toggleClass('has-key', Boolean(s.apiKey?.trim()));
         toastr.success('API 密钥已保存', 'Catiecli Tasks');
     });
     bindSaveIcon('#catiecli_tasks_save', async () => {
