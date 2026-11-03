@@ -1,0 +1,10 @@
+#catiecli_tasks_settings .inline-drawer-content {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#catiecli_tasks_settings input[type="text"] {
+    width: 100%;
+}

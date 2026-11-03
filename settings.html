@@ -1,0 +1,28 @@
+<div id="catiecli_tasks_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>Catiecli Tasks</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="flex-container flexFlowColumn">
+                <label class="checkbox_label">
+                    <input id="catiecli_tasks_enabled" type="checkbox">
+                    <span>接管 Custom (OpenAI 兼容) 源的生成请求(任务 API 模式)</span>
+                </label>
+                <span class="flex-basis100">留空跟随 Custom Endpoint;或强制指定上游地址:</span>
+                <input id="catiecli_tasks_upstream" type="text" class="text_pole" placeholder="https://catiecli.sukaka.top">
+                <div class="flex-container">
+                    <div id="catiecli_tasks_status" class="menu_button" title="测试与 catiecli 的连通性">
+                        <i class="fa-solid fa-plug-circle-check"></i>
+                        <span>测试连接</span>
+                    </div>
+                </div>
+                <span class="flex-basis100">
+                    生成请求改为「提交任务 + 轮询分片」,断网/切后台不报废回复。
+                    密钥复用 Custom 源的 API 密钥,无需另填。
+                </span>
+            </div>
+        </div>
+    </div>
+</div>

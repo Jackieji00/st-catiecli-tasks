@@ -1,0 +1,14 @@
+{
+    "display_name": "Catiecli Tasks",
+    "loading_order": 10,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "sukaka",
+    "version": "1.0.0",
+    "homePage": "https://github.com/su-kaka/st-catiecli-tasks",
+    "hooks": {
+        "activate": "init"
+    }
+}
