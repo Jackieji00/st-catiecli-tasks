@@ -21,10 +21,12 @@
  * 断网行为:提交/轮询自动重试(3 次指数退避),3 次都连不上才报错;
  * ST 侧中断(停止按钮)→ 扩展发 cancel,不浪费上游额度。
  */
-import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../extensions.js';
-import { saveSettingsDebounced } from '../../../script.js';
-import { chat_completion_sources } from '../../openai.js';
-import { SECRET_KEYS, findSecret } from '../../secrets.js';
+// 相对路径注意:第三方扩展经 /scripts/extensions/third-party/<name>/ 提供,
+// 比内置扩展深一层,所以是 ../../../(内置扩展用 ../../)
+import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
+import { saveSettingsDebounced } from '../../../../script.js';
+import { chat_completion_sources } from '../../../openai.js';
+import { SECRET_KEYS, findSecret } from '../../../secrets.js';
 
 const MODULE_NAME = 'st-catiecli-tasks';
 const GENERATE_URL = '/api/backends/chat-completions/generate';
