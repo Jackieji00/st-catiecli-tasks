@@ -1,6 +1,6 @@
 # st-catiecli-tasks
 
-SillyTavern 服务端插件：把 [catiecli-neo](https://github.com/su-kaka/catiecli-neo)
+SillyTavern 服务端插件：把 [catiecli](https://catiecli.sukaka.top/)
 的**任务 API**（`POST /v1/openai/tasks` 提交 → `GET .../tasks/{id}?after=N`
 轮询分片）封装成一个**标准 OpenAI 兼容端点**。
 
@@ -37,14 +37,22 @@ cmd /c mklink /J E:\projects\SillyTavern\plugins\st-catiecli-tasks E:\projects\s
 enableServerPlugins: true
 ```
 
-3. （可选）通过环境变量指定 catiecli 后端地址（默认 `http://127.0.0.1:5002`）：
+3. （可选）指向本地/其他 catiecli 实例：在 SillyTavern 的
+   **「自定义请求头 / Custom Include Headers」** 输入框里填（YAML 格式）：
 
+```yaml
+X-Catiecli-Url: http://127.0.0.1:5002
 ```
-CATIECLI_URL=http://127.0.0.1:5002
-```
+
+不填则默认使用内置线上地址 `https://catiecli.sukaka.top`（填 key 即用）。
+改完保存即生效，无需重启。
 
 4. 重启 SillyTavern，控制台看到
    `[st-catiecli-tasks] Provider ready.` 即加载成功。
+
+> 「自定义请求头」输入框在 ST 的 Chat Completion 设置里（Custom 源），
+> 与「自定义请求体 / Custom Include Body」相邻；其内容会随每个请求
+> 发往插件，插件按 `X-Catiecli-Url` 头路由到对应 catiecli 实例。
 
 ## 在 SillyTavern 中配置
 
@@ -74,6 +82,8 @@ OpenAI 路径提供 `/v1/models` 与 `/v1/chat/completions`。）
 | 错误透传 | 任务 `failed` 时按 `status_code` 返回错误体；流式中途失败写 OpenAI 惯例错误帧（ST 能弹出 toast） |
 | ST 停止按钮 | ST 断开连接 → 插件对任务发 cancel，2 秒内生效 |
 | 轮询上限 | 单任务 30 分钟，超时返回 504 |
+| 网络重试 | 提交/轮询/取消/模型列表遇到**连不上**自动重试 3 次（1s→2s 指数退避），3 次都失败才报"连续 3 次无法连接上游"；HTTP 4xx/5xx 是服务器明确响应，不重试直接透传 |
+| 上游地址 | 每请求读取 `X-Catiecli-Url` 头（ST 自定义请求头输入框）覆盖；默认内置线上地址 |
 | 鉴权 | 插件路由在 ST 登录鉴权之后；catiecli 密钥只在服务端之间传递 |
 
 > 插件本身**零依赖**（只用 Node ≥ 18 全局 fetch + ST 自带的 express）。

@@ -54,6 +54,48 @@ const POLL_FIRST_DELAY_MS = 300;
 const POLL_BUSY_DELAY_MS = 60;  // 已有新分片时快速跟进（准流式体验）
 const POLL_MAX_MINUTES = 30;    // 单任务最长轮询时间
 
+/** 网络类错误重试次数（3 次都连不上才判定真的连不上） */
+const NET_RETRY_MAX = 3;
+/** 网络重试退避基数（1s / 2s / 4s，上限 8s） */
+const NET_RETRY_BASE_MS = 1000;
+
+/** 判断是否网络类错误（fetch 抛 TypeError = 连接失败/DNS/断连）。
+ * HTTP 状态码错误不算：服务器明确响应了，重试无意义，直接透传。 */
+function isNetworkError(err) {
+    return err instanceof TypeError || err?.cause?.code === 'UND_ERR_CONNECT_TIMEOUT' || err?.cause?.code === 'ECONNREFUSED'
+        || err?.cause?.code === 'ECONNRESET' || err?.cause?.code === 'ETIMEDOUT' || err?.cause?.code === 'ENOTFOUND';
+}
+
+/**
+ * 网络类错误自动重试包装：最多 NET_RETRY_MAX 次，指数退避。
+ * 非 4xx/5xx 的失败原因（连不上）重试；HTTP 错误状态（带 statusCode）不重试直接抛。
+ * 全部失败抛最后一个错误，附明确说明"连续 N 次无法连接"。
+ */
+async function withNetRetry(label, fn, signal) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= NET_RETRY_MAX; attempt++) {
+        if (signal?.aborted) throw new Error('aborted');
+        try {
+            return await fn();
+        } catch (err) {
+            if (signal?.aborted) throw new Error('aborted');
+            // HTTP 状态码错误：服务器可达，响应明确 —— 不重试
+            if (err instanceof Error && err.statusCode !== undefined) throw err;
+            if (!isNetworkError(err)) throw err;
+            lastErr = err;
+            if (attempt < NET_RETRY_MAX) {
+                const delay = Math.min(NET_RETRY_BASE_MS * (2 ** (attempt - 1)), 8000);
+                console.warn(`[st-catiecli-tasks] ${label} 网络错误（第 ${attempt}/${NET_RETRY_MAX} 次），${delay / 1000}s 后重试: ${err.message}`);
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+    }
+    throw Object.assign(
+        new Error(`${label}: 连续 ${NET_RETRY_MAX} 次无法连接上游（${lastErr?.message ?? '网络错误'}），请检查网络或上游地址`),
+        { statusCode: 502 },
+    );
+}
+
 export const info = {
     id: 'st-catiecli-tasks',
     name: 'Catiecli Tasks Provider',
@@ -66,9 +108,10 @@ export const info = {
  * @param {number} after
  * @param {string} apiKey
  * @param {AbortSignal} signal
+ * @param {string} upstream catiecli 后端地址
  * @returns {Promise<any|null>}
  */
-async function pollTask(taskId, after, apiKey, signal) {
+async function pollTask(taskId, after, apiKey, signal, upstream) {
     const deadline = Date.now() + POLL_MAX_MINUTES * 60 * 1000;
     let cursor = after;
     let nextDelay = POLL_FIRST_DELAY_MS;
@@ -81,18 +124,18 @@ async function pollTask(taskId, after, apiKey, signal) {
         const url = new URL(`${upstream}/v1/openai/tasks/${encodeURIComponent(taskId)}`);
         url.searchParams.set('after', String(cursor));
 
-        const resp = await fetch(url, {
-            headers: { 'Authorization': `Bearer ${apiKey}` },
-            signal,
-            ...FETCH_OPTIONS,
-        });
-
-        if (!resp.ok) {
-            const text = await resp.text().catch(() => '');
-            throw Object.assign(new Error(`Task poll failed: ${resp.status} ${text.slice(0, 500)}`), { statusCode: resp.status });
-        }
-
-        const data = await resp.json();
+        const data = await withNetRetry('任务轮询', async () => {
+            const resp = await fetch(url, {
+                headers: { 'Authorization': `Bearer ${apiKey}` },
+                signal,
+                ...FETCH_OPTIONS,
+            });
+            if (!resp.ok) {
+                const text = await resp.text().catch(() => '');
+                throw Object.assign(new Error(`Task poll failed: ${resp.status} ${text.slice(0, 500)}`), { statusCode: resp.status });
+            }
+            return resp.json();
+        }, signal);
 
         // 运行中且有新分片 → 立即交给调用方，继续快速轮询（准流式）
         if (!data.done && Array.isArray(data.chunks) && data.chunks.length > 0) {
@@ -109,14 +152,10 @@ async function pollTask(taskId, after, apiKey, signal) {
 
 /**
  * 提交任务。请求体原样转发（就是 chat/completions 请求体）。
- * @param {object} body
- * @param {string} apiKey
- * @param {AbortSignal} signal
- * @param {string} upstream catiecli 后端地址
- * @returns {Promise<string>} task_id
+ * 网络类错误（连不上）自动重试 3 次；HTTP 错误直接透传。
  */
 async function submitTask(body, apiKey, signal, upstream) {
-    const resp = await fetch(`${upstream}/v1/openai/tasks`, {
+    return withNetRetry('任务提交', () => fetch(`${upstream}/v1/openai/tasks`, {
         method: 'POST',
         headers: {
             'Authorization': `Bearer ${apiKey}`,
@@ -125,25 +164,25 @@ async function submitTask(body, apiKey, signal, upstream) {
         body: JSON.stringify(body),
         signal,
         ...FETCH_OPTIONS,
-    });
-
-    const text = await resp.text();
-    if (!resp.ok) {
-        throw Object.assign(new Error(`Task submit failed: ${resp.status} ${text.slice(0, 1000)}`), { statusCode: resp.status });
-    }
-    const data = JSON.parse(text);
-    if (!data?.id) throw new Error('Task submit returned no task id');
-    return data.id;
+    }).then(async resp => {
+        const text = await resp.text();
+        if (!resp.ok) {
+            throw Object.assign(new Error(`Task submit failed: ${resp.status} ${text.slice(0, 1000)}`), { statusCode: resp.status });
+        }
+        const data = JSON.parse(text);
+        if (!data?.id) throw new Error('Task submit returned no task id');
+        return data.id;
+    }), signal);
 }
 
-/** 取消任务（尽力而为，失败只记日志）。 */
+/** 取消任务（尽力而为，失败仅记日志；网络错误重试 3 次）。 */
 async function cancelTask(taskId, apiKey, upstream) {
     try {
-        await fetch(`${upstream}/v1/openai/tasks/${encodeURIComponent(taskId)}/cancel`, {
+        await withNetRetry('任务取消', () => fetch(`${upstream}/v1/openai/tasks/${encodeURIComponent(taskId)}/cancel`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${apiKey}` },
             ...FETCH_OPTIONS,
-        });
+        }));
     } catch (err) {
         console.warn(`[st-catiecli-tasks] cancel task ${taskId} failed:`, err.message);
     }
@@ -298,15 +337,15 @@ export async function init(router) {
     api.get('/v1/models', async (req, res) => {
         try {
             const apiKey = req.headers['authorization']?.replace(/^Bearer\s+/i, '') ?? '';
-            const resp = await fetch(`${upstreamFromRequest(req)}/v1/models`, {
+            const resp = await withNetRetry('模型列表', () => fetch(`${upstreamFromRequest(req)}/v1/models`, {
                 headers: { 'Authorization': `Bearer ${apiKey}` },
                 ...FETCH_OPTIONS,
-            });
+            }));
             const text = await resp.text();
             res.status(resp.status).type(resp.headers.get('content-type') || 'application/json').send(text);
         } catch (err) {
             console.error('[st-catiecli-tasks] models failed:', err.message);
-            res.status(502).json({ error: { message: err.message } });
+            res.status(err.statusCode ?? 502).json({ error: { message: err.message } });
         }
     });
 
