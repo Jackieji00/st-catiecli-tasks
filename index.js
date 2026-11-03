@@ -26,7 +26,6 @@
 import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
 import { saveSettings, saveSettingsDebounced } from '../../../../script.js';
 import { chat_completion_sources } from '../../../openai.js';
-import { SECRET_KEYS, findSecret } from '../../../secrets.js';
 
 const MODULE_NAME = 'st-catiecli-tasks';
 const GENERATE_URL = '/api/backends/chat-completions/generate';
@@ -39,7 +38,8 @@ function getOaiSettings() {
 
 // ===== 设置 =====
 const defaultSettings = {
-    enabled: true,               // 总开关:接管 Custom 源的生成请求
+    enabled: false,              // 总开关:接管 Custom 源的生成请求
+    apiKey: '',                  // cat- 密钥(扩展自存,不依赖 ST secret)
     pollIntervalMs: 800,        // 常规轮询间隔
     busyPollIntervalMs: 60,      // 有新分片时的快速跟进间隔(准流式)
     netRetryMax: 3,              // 网络错误重试次数
@@ -77,20 +77,11 @@ function resolveUpstream() {
     return DEFAULT_UPSTREAM;
 }
 
-/** 读取 cat- 密钥:复用 Custom 源 secret(经 ST 后端 API 读,不另存一份) */
-let cachedKey = null;
-async function resolveApiKey() {
-    if (cachedKey) return cachedKey;
-    try {
-        const value = await findSecret(SECRET_KEYS.CUSTOM);
-        if (value) {
-            cachedKey = value;
-            return value;
-        }
-    } catch {
-        // ignore
-    }
-    throw new Error('未找到 API 密钥:请在 API 连接面板为 Custom 源设置 cat- 密钥');
+/** 读取 cat- 密钥:扩展设置里自带(不依赖 ST secret 存储/权限) */
+function resolveApiKey() {
+    const key = getSettings().apiKey?.trim();
+    if (key) return key;
+    throw new Error('未设置 API 密钥:请在 Catiecli Tasks 扩展面板填写 cat- 密钥并保存');
 }
 
 // ===== 网络重试包装(连不上才重试;HTTP 错误是明确响应,直接抛) =====
@@ -365,20 +356,46 @@ async function addSettingsPanel() {
     $('#extensions_settings2').append(html);
 
     const s = getSettings();
+
+    // 一键切换接管(标题栏内的开关)
     $('#catiecli_tasks_enabled').prop('checked', s.enabled).on('change', function () {
         s.enabled = $(this).prop('checked');
-        s.enabled ? installFetchPatch() : uninstallFetchPatch();
+        if (s.enabled) {
+            installFetchPatch();
+        } else {
+            uninstallFetchPatch();
+        }
         saveSettingsDebounced();
+        toastr.info(s.enabled ? '已开启任务 API 接管' : '已关闭接管,恢复 ST 原生直连', 'Catiecli Tasks');
     });
-    $('#catiecli_tasks_upstream').val(s.upstreamOverride).on('input', function () {
-        s.upstreamOverride = String($(this).val());
+
+    // 密钥:显示/隐藏
+    $('#catiecli_tasks_key').val(s.apiKey).on('input', function () {
+        s.apiKey = String($(this).val());
     });
-    $('#catiecli_tasks_save').on('click', async function () {
+    $('#catiecli_tasks_key_toggle').on('click', function () {
+        const input = $('#catiecli_tasks_key');
+        const isPassword = input.attr('type') === 'password';
+        input.attr('type', isPassword ? 'text' : 'password');
+        $(this).toggleClass('fa-eye fa-eye-slash');
+    });
+
+    // 保存按钮(密钥/上游共用行为:立即落盘 + 打勾反馈 + toast)
+    function bindSaveIcon(selector, onSave) {
+        $(selector).on('click', async function () {
+            await onSave();
+            await saveSettings();
+            const icon = $(this);
+            icon.addClass('fa-check').removeClass('fa-save');
+            setTimeout(() => icon.addClass('fa-save').removeClass('fa-check'), 1500);
+        });
+    }
+    bindSaveIcon('#catiecli_tasks_key_save', async () => {
+        s.apiKey = String($('#catiecli_tasks_key').val());
+        toastr.success('API 密钥已保存', 'Catiecli Tasks');
+    });
+    bindSaveIcon('#catiecli_tasks_save', async () => {
         s.upstreamOverride = String($('#catiecli_tasks_upstream').val());
-        await saveSettings();
-        const icon = $(this);
-        icon.addClass('fa-solid fa-check').removeClass('fa-save');
-        setTimeout(() => icon.addClass('fa-save').removeClass('fa-check'), 1500);
         toastr.success('上游地址已保存', 'Catiecli Tasks');
     });
 }

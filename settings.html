@@ -2,22 +2,30 @@
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
             <b>Catiecli Tasks</b>
+            <label class="checkbox_label" title="一键切换是否接管生成请求">
+                <input id="catiecli_tasks_enabled" type="checkbox">
+                <span>接管</span>
+            </label>
             <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
             <div class="flex-container flexFlowColumn">
-                <label class="checkbox_label">
-                    <input id="catiecli_tasks_enabled" type="checkbox">
-                    <span>接管 Custom (OpenAI 兼容) 源的生成请求(任务 API 模式)</span>
-                </label>
-                <span class="flex-basis100">留空跟随 Custom Endpoint;或强制指定上游地址:</span>
+                <span class="flex-basis100">cat- API 密钥(独立于 ST 连接设置):</span>
                 <div class="flex-container">
-                    <input id="catiecli_tasks_upstream" type="text" class="text_pole flex1" placeholder="https://catiecli.sukaka.top">
-                    <i id="catiecli_tasks_save" class="menu_button fa-solid fa-save" title="保存上游地址"></i>
+                    <input id="catiecli_tasks_key" type="password" class="text_pole flex1" placeholder="cat-xxxxxxxx" autocomplete="off">
+                    <i id="catiecli_tasks_key_toggle" class="menu_button fa-solid fa-eye" title="显示/隐藏密钥"></i>
+                    <i id="catiecli_tasks_key_save" class="menu_button fa-solid fa-save" title="保存密钥"></i>
                 </div>
+                <details class="flex-basis100">
+                    <summary style="cursor:pointer;opacity:.7">自定义上游地址(可选,默认跟随 Custom Endpoint)</summary>
+                    <div class="flex-container" style="margin-top:8px">
+                        <input id="catiecli_tasks_upstream" type="text" class="text_pole flex1" placeholder="https://catiecli.sukaka.top">
+                        <i id="catiecli_tasks_save" class="menu_button fa-solid fa-save" title="保存上游地址"></i>
+                    </div>
+                </details>
                 <span class="flex-basis100">
                     生成请求改为「提交任务 + 轮询分片」,断网/切后台不报废回复。
-                    密钥复用 Custom 源的 API 密钥,无需另填。
+                    仅在 Chat Completion 源为 Custom (OpenAI 兼容) 时接管。
                 </span>
             </div>
         </div>
