@@ -197,6 +197,10 @@ function shouldIntercept(generateData) {
     // 仅接管 Custom (OpenAI-compatible) 源
     if (getOaiSettings().chat_completion_source !== chat_completion_sources.CUSTOM) return false;
     if (!generateData || typeof generateData !== 'object' || !generateData.model) return false;
+    // 仅当 Custom Endpoint 指向 catiecli 时接管(含 catiecli 字样),
+    // 避免用户切到其他 Custom 兼容 API 时被误接管
+    const upstream = resolveUpstream();
+    if (!upstream.toLowerCase().includes('catiecli')) return false;
     return true;
 }
 

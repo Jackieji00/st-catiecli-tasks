@@ -25,7 +25,8 @@
                 </details>
                 <span class="flex-basis100">
                     生成请求改为「提交任务 + 轮询分片」,断网/切后台不报废回复。
-                    仅在 Chat Completion 源为 Custom (OpenAI 兼容) 时接管。
+                    仅接管 Custom 源且 API 地址含 catiecli 的连接(或已设自定义上游);
+                    换用其他 API 无需关开关,自动直连。
                 </span>
             </div>
         </div>
