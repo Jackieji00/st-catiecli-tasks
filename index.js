@@ -38,7 +38,7 @@ function getOaiSettings() {
 
 // ===== 轮询节奏(代码内固定,非用户设置) =====
 const POLL_INTERVAL_MS = 2000;   // 常规轮询间隔(等待中,无新分片)
-const BUSY_POLL_INTERVAL_MS = 250; // 有新分片时的快速跟进间隔(准流式)
+const BUSY_POLL_INTERVAL_MS = 500; // 流式打字机跟进间隔(有新分片时)
 const NET_RETRY_MAX = 3;         // 网络错误重试次数(3 次都连不上才报错)
 const NET_RETRY_BASE_MS = 1000;  // 重试退避基数(1s→2s→4s)
 const POLL_MAX_MINUTES = 30;     // 单任务最长轮询时间
