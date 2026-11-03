@@ -374,32 +374,6 @@ async function addSettingsPanel() {
         s.upstreamOverride = String($(this).val());
         saveSettingsDebounced();
     });
-    $('#catiecli_tasks_status').on('click', testConnection);
-}
-
-async function testConnection() {
-    const btn = $('#catiecli_tasks_status');
-    const original = btn.html();
-    btn.prop('disabled', true).html('测试中...');
-    try {
-        const upstream = resolveUpstream();
-        const apiKey = await resolveApiKey();
-        const resp = await withNetRetry('连通性测试', () => fetch(`${upstream}/v1/models`, {
-            headers: { 'Authorization': `Bearer ${apiKey}` },
-        }), getSettings());
-        if (resp.ok) {
-            const data = await resp.json();
-            const count = Array.isArray(data?.data) ? data.data.length : 0;
-            toastr.success(`连接成功,${count} 个模型可用(${upstream})`, 'Catiecli Tasks');
-        } else {
-            const text = await resp.text().catch(() => '');
-            toastr.error(`上游返回 ${resp.status}: ${text.slice(0, 200)}`, 'Catiecli Tasks');
-        }
-    } catch (err) {
-        toastr.error(err.message, 'Catiecli Tasks');
-    } finally {
-        btn.prop('disabled', false).html(original);
-    }
 }
 
 // ===== 入口 =====
