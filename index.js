@@ -65,17 +65,31 @@ function getSettings() {
 
 // ===== 上游地址与密钥 =====
 
-/** 上游 base:扩展设置强制地址 > Custom Endpoint(剥掉尾部 /v1) > 默认线上 */
-function resolveUpstream() {
+/** 规范化 base:去尾斜杠,剥掉 ST 后端会拼路径的 /v1、/v1beta 段 */
+function normalizeBaseUrl(raw) {
+    return String(raw || '').trim().replace(/\/+$/, '').replace(/\/(v1|v1beta)(\/|$)/gi, '');
+}
+
+/** 判断 URL 是否指向 catiecli(域名/整串含 catiecli 字样,大小写不敏感) */
+function isCatiecliUrl(raw) {
+    return normalizeBaseUrl(raw).toLowerCase().includes('catiecli');
+}
+
+/** 本次请求原定要打的上游(判定用,不含 override):请求体 custom_url 优先,缺席时用连接面板地址 */
+function requestTargetUrl(generateData) {
+    const fromBody = String(generateData?.custom_url ?? '').trim();
+    if (fromBody) return fromBody;
+    return String(getOaiSettings().custom_url ?? '').trim();
+}
+
+/** 上游 base(已确定接管后调用):强制上游 > 请求体/面板地址,否则默认线上 */
+function resolveUpstream(generateData) {
     const s = getSettings();
     if (s.upstreamOverride?.trim()) {
-        return s.upstreamOverride.trim().replace(/\/+$/, '');
+        return normalizeBaseUrl(s.upstreamOverride);
     }
-    // custom_url 形如 https://catiecli.sukaka.top/v1(ST 后端会拼 /chat/completions)
-    const url = (getOaiSettings().custom_url || '').replace(/\/+$/, '');
-    if (url) {
-        return url.replace(/\/(v1|v1beta)$/i, '');
-    }
+    const target = requestTargetUrl(generateData);
+    if (target) return normalizeBaseUrl(target);
     return DEFAULT_UPSTREAM;
 }
 
@@ -190,18 +204,23 @@ function extractOpenAIBody(generateData) {
     return body;
 }
 
-/** 是否应拦截本次 generate 请求 */
+/** 是否应拦截本次 generate 请求(逐请求判定,不依赖面板全局状态) */
 function shouldIntercept(generateData) {
     const s = getSettings();
     if (!s.enabled) return false;
-    // 仅接管 Custom (OpenAI-compatible) 源
-    if (getOaiSettings().chat_completion_source !== chat_completion_sources.CUSTOM) return false;
+    // 仅接管 Custom (OpenAI-compatible) 源 —— 以请求体为准:
+    // 第三方插件走同一个 /generate 端点,请求体自带各自的 chat_completion_source
+    if (generateData?.chat_completion_source !== chat_completion_sources.CUSTOM) return false;
     if (!generateData || typeof generateData !== 'object' || !generateData.model) return false;
-    // 仅当 Custom Endpoint 指向 catiecli 时接管(含 catiecli 字样),
-    // 避免用户切到其他 Custom 兼容 API 时被误接管
-    const upstream = resolveUpstream();
-    if (!upstream.toLowerCase().includes('catiecli')) return false;
-    return true;
+    // 逐请求判定本次请求要打的上游:请求体 custom_url 优先(第三方插件自带),
+    // 缺席时兜底连接面板地址。仅当它指向 catiecli 才接管,其他 API 自动直连。
+    // upstreamOverride 表示「我的连接地址是 catiecli 反代(域名不含 catiecli 字样),
+    // 强制接管」—— 仅当请求体没有自带 custom_url 时生效(即用户自己的连接),
+    // 不会劫走第三方插件显式带 URL 的请求。
+    const target = requestTargetUrl(generateData);
+    if (!target) return false;
+    if (s.upstreamOverride?.trim() && !String(generateData?.custom_url ?? '').trim()) return true;
+    return isCatiecliUrl(target);
 }
 
 /** 非流式:envelope → 伪 Response(failed 时 ok=false,ST 会弹错并透传错误体) */
@@ -290,7 +309,7 @@ function streamTaskResponse(upstream, apiKey, taskId, signal) {
 
 /** 把 catiecli 任务跑成一个伪 Response(SSE 流或 JSON),接口与 ST 期望一致 */
 async function runTaskAsResponse(generateData, signal) {
-    const upstream = resolveUpstream();
+    const upstream = resolveUpstream(generateData);
     const apiKey = await resolveApiKey();
     const requestBody = extractOpenAIBody(generateData);
 
