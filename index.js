@@ -23,18 +23,13 @@
  */
 // 相对路径注意:第三方扩展经 /scripts/extensions/third-party/<name>/ 提供,
 // 比内置扩展深一层,所以是 ../../../(内置扩展用 ../../)
-import { extension_settings, renderExtensionTemplateAsync, getContext } from '../../../extensions.js';
+import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
 import { saveSettings, saveSettingsDebounced } from '../../../../script.js';
 import { chat_completion_sources } from '../../../openai.js';
 
 const MODULE_NAME = 'st-catiecli-tasks';
 const GENERATE_URL = '/api/backends/chat-completions/generate';
 const DEFAULT_UPSTREAM = 'https://catiecli.sukaka.top';
-
-/** oai_settings 未从 openai.js 导出;官方扩展 API getContext().chatCompletionSettings 即它 */
-function getOaiSettings() {
-    return getContext()?.chatCompletionSettings ?? {};
-}
 
 // ===== 轮询节奏(代码内固定,非用户设置) =====
 const POLL_INTERVAL_MS = 2000;   // 常规轮询间隔(等待中,无新分片)
@@ -48,6 +43,7 @@ const defaultSettings = {
     enabled: false,              // 总开关:接管 Custom 源的生成请求
     apiKey: '',                  // cat- 密钥(扩展自存,不依赖 ST secret)
     upstreamOverride: '',        // 留空用 Custom Endpoint;否则强制此地址
+    interceptKeyword: 'catiecli', // 接管关键词:请求体 URL 命中才接管(正则,大小写不敏感)
 };
 
 function loadSettings() {
@@ -70,26 +66,10 @@ function normalizeBaseUrl(raw) {
     return String(raw || '').trim().replace(/\/+$/, '').replace(/\/(v1|v1beta)(\/|$)/gi, '');
 }
 
-/** 判断 URL 是否指向 catiecli(域名/整串含 catiecli 字样,大小写不敏感) */
-function isCatiecliUrl(raw) {
-    return normalizeBaseUrl(raw).toLowerCase().includes('catiecli');
-}
-
-/** 本次请求原定要打的上游(判定用,不含 override):请求体 custom_url 优先,缺席时用连接面板地址 */
-function requestTargetUrl(generateData) {
-    const fromBody = String(generateData?.custom_url ?? '').trim();
-    if (fromBody) return fromBody;
-    return String(getOaiSettings().custom_url ?? '').trim();
-}
-
-/** 上游 base(已确定接管后调用):强制上游 > 请求体/面板地址,否则默认线上 */
+/** 上游 base:请求体 custom_url(剥掉尾部 /v1);否则默认线上 */
 function resolveUpstream(generateData) {
-    const s = getSettings();
-    if (s.upstreamOverride?.trim()) {
-        return normalizeBaseUrl(s.upstreamOverride);
-    }
-    const target = requestTargetUrl(generateData);
-    if (target) return normalizeBaseUrl(target);
+    const url = String(generateData?.custom_url ?? '').trim();
+    if (url) return normalizeBaseUrl(url);
     return DEFAULT_UPSTREAM;
 }
 
@@ -204,7 +184,18 @@ function extractOpenAIBody(generateData) {
     return body;
 }
 
-/** 是否应拦截本次 generate 请求(逐请求判定,不依赖面板全局状态) */
+/** 接管关键词正则:无效/留空时退回默认 catiecli */
+function interceptKeywordRegex() {
+    const raw = String(getSettings().interceptKeyword ?? '').trim() || 'catiecli';
+    try {
+        return new RegExp(raw, 'i');
+    } catch {
+        console.warn(`[st-catiecli-tasks] 接管关键词正则无效,退回默认: ${raw}`);
+        return /catiecli/i;
+    }
+}
+
+/** 是否应拦截本次 generate 请求:请求体 URL 命中关键词才接管,逐请求判定 */
 function shouldIntercept(generateData) {
     const s = getSettings();
     if (!s.enabled) return false;
@@ -212,15 +203,8 @@ function shouldIntercept(generateData) {
     // 第三方插件走同一个 /generate 端点,请求体自带各自的 chat_completion_source
     if (generateData?.chat_completion_source !== chat_completion_sources.CUSTOM) return false;
     if (!generateData || typeof generateData !== 'object' || !generateData.model) return false;
-    // 逐请求判定本次请求要打的上游:请求体 custom_url 优先(第三方插件自带),
-    // 缺席时兜底连接面板地址。仅当它指向 catiecli 才接管,其他 API 自动直连。
-    // upstreamOverride 表示「我的连接地址是 catiecli 反代(域名不含 catiecli 字样),
-    // 强制接管」—— 仅当请求体没有自带 custom_url 时生效(即用户自己的连接),
-    // 不会劫走第三方插件显式带 URL 的请求。
-    const target = requestTargetUrl(generateData);
-    if (!target) return false;
-    if (s.upstreamOverride?.trim() && !String(generateData?.custom_url ?? '').trim()) return true;
-    return isCatiecliUrl(target);
+    // 逐请求正则判断:请求体 custom_url 命中关键词就接管,没有就不拦截
+    return interceptKeywordRegex().test(String(generateData.custom_url ?? ''));
 }
 
 /** 非流式:envelope → 伪 Response(failed 时 ok=false,ST 会弹错并透传错误体) */
@@ -407,10 +391,15 @@ async function addSettingsPanel() {
         $(this).toggleClass('fa-eye fa-eye-slash');
     });
 
-    // 保存按钮(密钥/上游共用行为:立即落盘 + 打勾反馈 + toast)
+    // 保存按钮(密钥/上游共用行为:立即落盘 + 打勾反馈 + toast;onSave 抛错则不落盘)
     function bindSaveIcon(selector, onSave) {
         $(selector).on('click', async function () {
-            await onSave();
+            try {
+                await onSave();
+            } catch (err) {
+                console.warn('[st-catiecli-tasks] 保存失败:', err.message);
+                return;
+            }
             await saveSettings();
             const icon = $(this);
             icon.addClass('fa-check').removeClass('fa-save');
@@ -425,6 +414,18 @@ async function addSettingsPanel() {
     bindSaveIcon('#catiecli_tasks_save', async () => {
         s.upstreamOverride = String($('#catiecli_tasks_upstream').val());
         toastr.success('上游地址已保存', 'Catiecli Tasks');
+    });
+    $('#catiecli_tasks_keyword').val(s.interceptKeyword ?? 'catiecli');
+    bindSaveIcon('#catiecli_tasks_keyword_save', async () => {
+        const raw = String($('#catiecli_tasks_keyword').val()).trim();
+        try {
+            new RegExp(raw, 'i'); // 提前校验,非法正则不落盘
+        } catch {
+            toastr.error('接管关键词不是合法的正则表达式,未保存', 'Catiecli Tasks');
+            throw new Error('invalid regex');
+        }
+        s.interceptKeyword = raw;
+        toastr.success(raw ? `接管关键词已保存:${raw}` : '已清空,恢复默认 catiecli', 'Catiecli Tasks');
     });
 }
 

@@ -23,10 +23,17 @@
                         <i id="catiecli_tasks_save" class="menu_button fa-solid fa-save" title="保存上游地址"></i>
                     </div>
                 </details>
+                <details class="flex-basis100">
+                    <summary style="cursor:pointer;opacity:.7">接管关键词(高级,默认 catiecli)</summary>
+                    <div class="flex-container" style="margin-top:8px">
+                        <input id="catiecli_tasks_keyword" type="text" class="text_pole flex1" placeholder="catiecli" title="请求地址含该关键词才接管;正则语法,大小写不敏感">
+                        <i id="catiecli_tasks_keyword_save" class="menu_button fa-solid fa-save" title="保存接管关键词"></i>
+                    </div>
+                </details>
                 <span class="flex-basis100">
                     生成请求改为「提交任务 + 轮询分片」,断网/切后台不报废回复。
-                    每次请求逐个判断链接:仅接管 Custom 源且请求地址指向 catiecli 的连接
-                    (或已设自定义上游);其他 API / 第三方插件自动直连,无需关开关。
+                    每次请求逐个判断:仅请求地址命中接管关键词(默认 catiecli)才接管,
+                    其他 API / 第三方插件自动直连,无需关开关。
                 </span>
             </div>
         </div>
