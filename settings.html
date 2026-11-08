@@ -1,7 +1,7 @@
 <div id="catiecli_tasks_settings">
     <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-            <b>Catiecli Tasks</b>
+            <b>Catiecli Tasks · 兼容版</b>
             <label class="checkbox_label" title="一键切换是否接管生成请求">
                 <input id="catiecli_tasks_enabled" type="checkbox">
                 <span>接管</span>
@@ -10,14 +10,14 @@
         </div>
         <div class="inline-drawer-content">
             <div class="flex-container flexFlowColumn">
-                <span class="flex-basis100 catiecli-key-label"><i class="fa-solid fa-key"></i> <b>cat- API 密钥</b>(独立于 ST 连接设置,填后保存):</span>
+                <span class="flex-basis100 catiecli-key-label"><i class="fa-solid fa-key"></i> <b>cat- API 密钥</b>（独立请求已有密钥时优先使用其密钥）:</span>
                 <div class="flex-container">
                     <input id="catiecli_tasks_key" type="password" class="text_pole flex1 catiecli-key-input" placeholder="cat-xxxxxxxx" autocomplete="off">
                     <i id="catiecli_tasks_key_toggle" class="menu_button fa-solid fa-eye" title="显示/隐藏密钥"></i>
                     <i id="catiecli_tasks_key_save" class="menu_button fa-solid fa-save" title="保存密钥"></i>
                 </div>
                 <details class="flex-basis100">
-                    <summary style="cursor:pointer;opacity:.7">自定义上游地址(可选,默认跟随 Custom Endpoint)</summary>
+                    <summary style="cursor:pointer;opacity:.7">插件密钥所属地址（默认猫站，无需填写）</summary>
                     <div class="flex-container" style="margin-top:8px">
                         <input id="catiecli_tasks_upstream" type="text" class="text_pole flex1" placeholder="https://catiecli.sukaka.top">
                         <i id="catiecli_tasks_save" class="menu_button fa-solid fa-save" title="保存上游地址"></i>
@@ -31,10 +31,16 @@
                     </div>
                 </details>
                 <span class="flex-basis100">
-                    生成请求改为「提交任务 + 轮询分片」,断网/切后台不报废回复。
-                    每次请求逐个判断:仅请求地址命中接管关键词(默认 catiecli)才接管,
-                    其他 API / 第三方插件自动直连,无需关开关。
+                    切后台或断网后，页面还在就继续接收同一条回复。提交结果不明时先找回任务，避免重复生成。
+                    页面重载后可找回并下载结果；不会自动写入聊天或运行预设。
                 </span>
+                <details class="flex-basis100">
+                    <summary>找回后台任务</summary>
+                    <p>使用上方保存的密钥查询未过期任务。独立总结使用另一把密钥时，需先保存对应密钥。结果保留时间以站点为准，请及时取走。</p>
+                    <button id="catiecli_tasks_recover" type="button" class="menu_button">刷新任务列表</button>
+                    <div id="catiecli_tasks_list"></div>
+                </details>
+                <p id="catiecli_tasks_status" role="status">默认关闭。启用后生效；首次安装或更新后请刷新页面。</p>
             </div>
         </div>
     </div>

@@ -1,358 +1,333 @@
 /**
- * Catiecli Tasks — SillyTavern UI 扩展(纯前端,Extensions 贴 git 链接即装)
- *
- * 用 catiecli 的「任务 API」(提交 + 轮询分片)接管 SillyTavern 的 Chat
- * Completion 生成请求,根治长连接网络不稳定:断网/切后台不再报废整个回复。
- *
- * 工作方式:
- *   ST 前端 sendOpenAIRequest 会 fetch('/api/backends/chat-completions/generate')
- *   本扩展 patch window.fetch 拦截该请求,改为在浏览器内直接:
- *     1. POST {catiecli}/v1/openai/tasks      提交任务(秒回 task_id)
- *     2. GET  {catiecli}/v1/openai/tasks/{id}?after=N  轮询增量分片
- *     3. 分片原样推进 ReadableStream → 返回伪 Response 给 ST 的 SSE 解析器
- *   (catiecli 全站 CORS 放行,浏览器可直连)
- *
- * 使用(Extensions 里启用本扩展后):
- *   1. API 选 Chat Completion → 源选 Custom (OpenAI-compatible)
- *   2. Custom Endpoint 填 catiecli 地址,如 https://catiecli.sukaka.top/v1
- *   3. API 密钥填 cat- 密钥(本扩展直接复用该密钥,无需另填)
- *   4. 连接(后端直连 catiecli /v1/models,标准协议)→ 选模型 → 生成
- *
- * 断网行为:提交/轮询自动重试(3 次指数退避),3 次都连不上才报错;
- * ST 侧中断(停止按钮)→ 扩展发 cancel,不浪费上游额度。
+ * Catiecli Tasks — TRANS-AM compatibility fork.
+ * Based on su-kaka/st-catiecli-tasks v1.2.0, MIT, Copyright (c) 2026 sukaka.
+ * Keeps the original task API and ST response path; see README for tested limits.
  */
 // 相对路径注意:第三方扩展经 /scripts/extensions/third-party/<name>/ 提供,
 // 比内置扩展深一层,所以是 ../../../(内置扩展用 ../../)
 import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
 import { saveSettings, saveSettingsDebounced } from '../../../../script.js';
-import { chat_completion_sources } from '../../../openai.js';
+import { yaml } from '../../../../lib.js';
 
 const MODULE_NAME = 'st-catiecli-tasks';
 const GENERATE_URL = '/api/backends/chat-completions/generate';
 const DEFAULT_UPSTREAM = 'https://catiecli.sukaka.top';
 
-// ===== 轮询节奏(代码内固定,非用户设置) =====
-const POLL_INTERVAL_MS = 2000;   // 常规轮询间隔(等待中,无新分片)
-const BUSY_POLL_INTERVAL_MS = 500; // 流式打字机跟进间隔(有新分片时)
-const NET_RETRY_MAX = 3;         // 网络错误重试次数(3 次都连不上才报错)
-const NET_RETRY_BASE_MS = 1000;  // 重试退避基数(1s→2s→4s)
-const POLL_MAX_MINUTES = 30;     // 单任务最长轮询时间
-
-// ===== 设置(仅用户真正会改的东西) =====
-const defaultSettings = {
-    enabled: false,              // 总开关:接管 Custom 源的生成请求
-    apiKey: '',                  // cat- 密钥(扩展自存,不依赖 ST secret)
-    upstreamOverride: '',        // 留空用 Custom Endpoint;否则强制此地址
-    interceptKeyword: 'catiecli', // 接管关键词:请求体 URL 命中才接管(正则,大小写不敏感)
-};
-
-function loadSettings() {
-    extension_settings[MODULE_NAME] = extension_settings[MODULE_NAME] || {};
-    for (const key of Object.keys(defaultSettings)) {
-        if (extension_settings[MODULE_NAME][key] === undefined) {
-            extension_settings[MODULE_NAME][key] = defaultSettings[key];
-        }
-    }
-}
-
-function getSettings() {
-    return extension_settings[MODULE_NAME] ?? defaultSettings;
-}
-
-// ===== 上游地址与密钥 =====
-
-/** 规范化 base:去尾斜杠,剥掉 ST 后端会拼路径的 /v1、/v1beta 段 */
-function normalizeBaseUrl(raw) {
-    return String(raw || '').trim().replace(/\/+$/, '').replace(/\/(v1|v1beta)(\/|$)/gi, '');
-}
-
-/** 上游 base:请求体 custom_url(剥掉尾部 /v1);否则默认线上 */
-function resolveUpstream(generateData) {
-    const url = String(generateData?.custom_url ?? '').trim();
-    if (url) return normalizeBaseUrl(url);
-    return DEFAULT_UPSTREAM;
-}
-
-/** 读取 cat- 密钥:扩展设置里自带(不依赖 ST secret 存储/权限) */
-function resolveApiKey() {
-    const key = getSettings().apiKey?.trim();
-    if (key) return key;
-    throw new Error('未设置 API 密钥:请在 Catiecli Tasks 扩展面板填写 cat- 密钥并保存');
-}
-
-// ===== 网络重试包装(连不上才重试;HTTP 错误是明确响应,直接抛) =====
-
-function isNetworkError(err) {
-    return err instanceof TypeError || ['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT']
-        .includes(err?.cause?.code);
-}
-
-async function withNetRetry(label, fn) {
-    let lastErr = null;
-    for (let attempt = 1; attempt <= NET_RETRY_MAX; attempt++) {
-        try {
-            return await fn();
-        } catch (err) {
-            if (err instanceof Error && err.statusCode !== undefined) throw err; // HTTP 错误:透传
-            if (!isNetworkError(err)) throw err;
-            lastErr = err;
-            if (attempt < NET_RETRY_MAX) {
-                const delay = Math.min(NET_RETRY_BASE_MS * (2 ** (attempt - 1)), 8000);
-                console.warn(`[st-catiecli-tasks] ${label} 网络错误(第 ${attempt}/${NET_RETRY_MAX} 次),${delay / 1000}s 后重试: ${err.message}`);
-                await new Promise(r => setTimeout(r, delay));
-            }
-        }
-    }
-    throw Object.assign(
-        new Error(`${label}: 连续 ${NET_RETRY_MAX} 次无法连接上游(${lastErr?.message ?? '网络错误'})`),
-        { statusCode: 502 },
-    );
-}
-
-// ===== 任务 API 客户端 =====
-
-async function submitTask(upstream, apiKey, body) {
-    return withNetRetry('任务提交', () => fetch(`${upstream}/v1/openai/tasks`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    }).then(async resp => {
-        const text = await resp.text();
-        if (!resp.ok) {
-            throw Object.assign(new Error(`任务提交失败: ${resp.status} ${text.slice(0, 500)}`), { statusCode: resp.status });
-        }
-        const data = JSON.parse(text);
-        if (!data?.id) throw new Error('任务提交未返回 task_id');
-        return data.id;
-    }));
-}
-
-async function pollTask(upstream, apiKey, taskId, after) {
-    return withNetRetry('任务轮询', () => fetch(`${upstream}/v1/openai/tasks/${encodeURIComponent(taskId)}?after=${after}`, {
-        headers: { 'Authorization': `Bearer ${apiKey}` },
-    }).then(async resp => {
-        if (!resp.ok) {
-            const text = await resp.text().catch(() => '');
-            throw Object.assign(new Error(`任务查询失败: ${resp.status} ${text.slice(0, 500)}`), { statusCode: resp.status });
-        }
-        return resp.json();
-    }));
-}
-
-async function cancelTask(upstream, apiKey, taskId) {
-    try {
-        await fetch(`${upstream}/v1/openai/tasks/${encodeURIComponent(taskId)}/cancel`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${apiKey}` },
-        });
-    } catch (err) {
-        console.warn(`[st-catiecli-tasks] 取消任务 ${taskId} 失败:`, err.message);
-    }
-}
-
-// ===== fetch 拦截:接管生成请求 =====
-
-const originalFetch = window.fetch;
+// Always install before preset scripts (Tavern Helper loading_order is 100).
+// Toggling only changes enabled; never restore an old fetch over another wrapper.
+const originalFetch = window.fetch.bind(window);
+const loadedAfterPreset = Boolean(window.ta_outer_transport_status);
+const defaultSettings = { enabled: false, apiKey: '', upstreamOverride: '', interceptKeyword: 'catiecli' };
+const POLL_MAX_MS = 30 * 60 * 1000;
 let patched = false;
 
-/** 从 ST 的 generate_data 提取 OpenAI 协议字段(与 ST 后端发给上游的请求体同构) */
-function extractOpenAIBody(generateData) {
-    const body = {
-        messages: generateData.messages,
-        model: generateData.model,
-        temperature: generateData.temperature,
-        frequency_penalty: generateData.frequency_penalty,
-        presence_penalty: generateData.presence_penalty,
-        top_p: generateData.top_p,
-        max_tokens: generateData.max_tokens,
-        max_completion_tokens: generateData.max_completion_tokens,
-        stream: !!generateData.stream,
-        stop: generateData.stop,
-        logit_bias: generateData.logit_bias,
-        seed: generateData.seed,
-        n: generateData.n,
-        response_format: generateData.response_format,
-        tools: generateData.tools,
-        tool_choice: generateData.tool_choice,
-        reasoning_effort: generateData.reasoning_effort,
-        verbosity: generateData.verbosity,
-    };
-    // 移除 undefined 字段,避免 catiecli 收到无意义 null
-    for (const k of Object.keys(body)) {
-        if (body[k] === undefined) delete body[k];
+function loadSettings() {
+    extension_settings[MODULE_NAME] ??= {};
+    for (const [key, value] of Object.entries(defaultSettings)) {
+        extension_settings[MODULE_NAME][key] ??= value;
     }
+}
+function getSettings() { return extension_settings[MODULE_NAME] ?? defaultSettings; }
+function reportStatus(text) {
+    const node = document.getElementById('catiecli_tasks_status');
+    if (node) node.textContent = text;
+}
+function normalizeBaseUrl(raw) {
+    const url = new URL(String(raw).trim());
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        throw new Error('任务接口需要不含账号、查询参数或片段的 HTTP(S) 基础地址');
+    }
+    return url.href.replace(/\/+$/, '').replace(/\/v1$/i, '');
+}
+function resolveUpstream(data) { return normalizeBaseUrl(data.custom_url); }
+function yamlObject(text) {
+    if (!text) return {};
+    const value = yaml.parse(text);
+    const rows = Array.isArray(value) ? value : [value];
+    if (rows.some(row => !row || typeof row !== 'object' || Array.isArray(row))) {
+        throw new Error('自定义请求体或请求头必须是 YAML 对象');
+    }
+    return Object.assign({}, ...rows);
+}
+function resolveHeaders(data, upstream) {
+    const headers = new Headers(yamlObject(data.custom_include_headers));
+    if (!headers.has('Authorization')) {
+        let key;
+        if (data.reverse_proxy && Object.hasOwn(data, 'proxy_password')) {
+            key = String(data.proxy_password ?? '').trim();
+        } else if (Object.hasOwn(data, 'api_key_custom')) {
+            key = String(data.api_key_custom ?? '').trim();
+        } else {
+            const settings = getSettings();
+            if (upstream !== normalizeBaseUrl(settings.upstreamOverride || DEFAULT_UPSTREAM)) {
+                throw new Error('本次独立连接未提供密钥，且地址与插件密钥所属地址不同；未发送请求');
+            }
+            key = String(settings.apiKey ?? '').trim();
+        }
+        if (!key) throw new Error('请填写本次独立连接的密钥，或在插件中保存猫站密钥');
+        headers.set('Authorization', 'Bearer ' + key);
+    }
+    headers.set('Content-Type', 'application/json');
+    return headers;
+}
+function extractOpenAIBody(data) {
+    const body = {};
+    for (const key of ['messages', 'model', 'temperature', 'frequency_penalty', 'presence_penalty',
+        'top_p', 'max_tokens', 'max_completion_tokens', 'stop', 'logit_bias', 'seed', 'n',
+        'response_format', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning_effort', 'verbosity']) {
+        if (data[key] !== undefined) body[key] = structuredClone(data[key]);
+    }
+    body.stream = Boolean(data.stream);
+    if (data.logprobs > 0) { body.logprobs = true; body.top_logprobs = data.logprobs; }
+    Object.assign(body, yamlObject(data.custom_include_body));
+    if (data.json_schema) {
+        body.response_format = { type: 'json_schema', json_schema: {
+            name: data.json_schema.name, strict: data.json_schema.strict ?? true, schema: data.json_schema.value,
+        } };
+    }
+    if (data.custom_exclude_body) {
+        const exclusions = yaml.parse(data.custom_exclude_body);
+        const keys = Array.isArray(exclusions) ? exclusions
+            : typeof exclusions === 'string' ? [exclusions] : Object.keys(exclusions ?? {});
+        for (const key of keys) delete body[key];
+    }
+    if (!body.model || !Array.isArray(body.messages)) throw new Error('最终请求缺少 model 或 messages');
+    if (Boolean(body.stream) !== Boolean(data.stream)) throw new Error('自定义 stream 与酒馆流式设置不一致，未提交任务');
     return body;
 }
-
-/** 接管关键词正则:无效/留空时退回默认 catiecli */
-function interceptKeywordRegex() {
-    const raw = String(getSettings().interceptKeyword ?? '').trim() || 'catiecli';
-    try {
-        return new RegExp(raw, 'i');
-    } catch {
-        console.warn(`[st-catiecli-tasks] 接管关键词正则无效,退回默认: ${raw}`);
-        return /catiecli/i;
+function shouldIntercept(data) {
+    if (!getSettings().enabled || data?.chat_completion_source !== 'custom' || !data.model) return false;
+    const pattern = String(getSettings().interceptKeyword || 'catiecli');
+    if (!new RegExp(pattern, 'i').test(String(data.custom_url ?? ''))) return false;
+    // Preserve ST's backend transformations when this browser adapter cannot reproduce them.
+    if (data.custom_prompt_post_processing) {
+        reportStatus('本次沿用酒馆直连：启用了提示词后处理');
+        return false;
     }
+    if (loadedAfterPreset) {
+        reportStatus('本次沿用酒馆直连：插件在预设之后加载，请刷新页面');
+        return false;
+    }
+    return true;
 }
-
-/** 是否应拦截本次 generate 请求:请求体 URL 命中关键词才接管,逐请求判定 */
-function shouldIntercept(generateData) {
-    const s = getSettings();
-    if (!s.enabled) return false;
-    // 仅接管 Custom (OpenAI-compatible) 源 —— 以请求体为准:
-    // 第三方插件走同一个 /generate 端点,请求体自带各自的 chat_completion_source
-    if (generateData?.chat_completion_source !== chat_completion_sources.CUSTOM) return false;
-    if (!generateData || typeof generateData !== 'object' || !generateData.model) return false;
-    // 逐请求正则判断:请求体 custom_url 命中关键词就接管,没有就不拦截
-    return interceptKeywordRegex().test(String(generateData.custom_url ?? ''));
-}
-
-/** 非流式:envelope → 伪 Response(failed 时 ok=false,ST 会弹错并透传错误体) */
-function envelopeToResponse(env) {
-    const status = env.status === 'failed'
-        ? (env.status_code ?? 502)
-        : (env.status === 'cancelled' ? 499 : 200);
-    const body = env.status === 'completed'
-        ? JSON.stringify(env.result ?? {})
-        : JSON.stringify(env.result ?? { error: { message: env.error ?? `任务 ${env.status}`, code: status } });
-    return new Response(body, {
-        status,
-        headers: { 'Content-Type': 'application/json' },
+function waitForPoll(ms, signal) {
+    signal?.throwIfAborted();
+    return new Promise((resolve, reject) => {
+        const finish = () => { signal?.removeEventListener('abort', stop); resolve(); };
+        const timer = setTimeout(finish, ms);
+        const stop = () => { clearTimeout(timer); reject(signal.reason); };
+        signal?.addEventListener('abort', stop, { once: true });
     });
 }
+async function submitTask(upstream, headers, body) {
+    // POST is intentionally never retried: a lost response does not mean submission failed.
+    let response;
+    try {
+        response = await originalFetch(upstream + '/v1/openai/tasks', {
+            method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30000),
+        });
+    } catch (error) {
+        throw new Error('任务提交结果不明，未自动重提。请用插件的“找回后台任务”核对，避免重复生成。', { cause: error });
+    }
+    if (!response.ok) throw new Error('任务提交失败：HTTP ' + response.status);
+    let data;
+    try { data = await response.json(); }
+    catch (error) { throw new Error('任务可能已提交，但返回内容不完整；未自动重提。', { cause: error }); }
+    if (!data?.id) throw new Error('提交响应没有任务 ID；未自动重提');
+    return data.id;
+}
+async function cancelTask(upstream, headers, id) {
+    const response = await originalFetch(upstream + '/v1/openai/tasks/' + encodeURIComponent(id) + '/cancel', {
+        method: 'POST', headers, signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error('取消任务失败：HTTP ' + response.status);
+}
+async function pollTask(upstream, headers, id, after, signal, deadline) {
+    while (Date.now() < deadline) {
+        signal?.throwIfAborted();
+        try {
+            const timeout = AbortSignal.timeout(Math.max(1, Math.min(15000, deadline - Date.now())));
+            const response = await originalFetch(upstream + '/v1/openai/tasks/' + encodeURIComponent(id) + '?after=' + after, {
+                headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+            });
+            if ([408, 429, 500, 502, 503, 504].includes(response.status)) {
+                reportStatus('查询暂不可用，继续等待同一个任务：' + id);
+                await waitForPoll(2000, signal);
+                continue;
+            }
+            if (!response.ok) throw new Error('任务查询失败：HTTP ' + response.status + '；任务 ' + id);
+            return await response.json();
+        } catch (error) {
+            signal?.throwIfAborted();
+            if (!(error instanceof TypeError) && error.name !== 'TimeoutError') throw error;
+            reportStatus('网络暂不可用，继续等待同一个任务：' + id);
+            await waitForPoll(Math.min(2000, Math.max(0, deadline - Date.now())), signal);
+        }
+    }
+    throw new Error('任务轮询达到 30 分钟上限：' + id);
+}
 
-/** 流式:伪 SSE Response,分片推进 ReadableStream(准流式) */
-function streamTaskResponse(upstream, apiKey, taskId, signal) {
+function recoveryConnection() {
+    const settings = getSettings();
+    const upstream = normalizeBaseUrl(settings.upstreamOverride || DEFAULT_UPSTREAM);
+    return { upstream, headers: resolveHeaders({ custom_url: upstream }, upstream) };
+}
+async function listTasks(upstream, headers) {
+    const response = await originalFetch(upstream + '/v1/openai/tasks', {
+        headers, signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) throw new Error('找回任务失败：HTTP ' + response.status);
+    const result = await response.json();
+    if (!Array.isArray(result.data)) throw new Error('任务列表格式异常');
+    return result.data;
+}
+async function readTaskResult(upstream, headers, id, onProgress) {
+    const deadline = Date.now() + POLL_MAX_MS;
+    let after = 0, text = '';
+    while (Date.now() < deadline) {
+        const env = await pollTask(upstream, headers, id, after, undefined, deadline);
+        if (env.stream || Array.isArray(env.chunks)) {
+            const chunks = env.chunks ?? [];
+            if (chunks.some(chunk => typeof chunk !== 'string') || env.next_after !== after + chunks.length) {
+                throw new Error('找回任务的分片游标异常');
+            }
+            text += chunks.join('');
+            after = env.next_after;
+        }
+        onProgress(env.status);
+        if (env.done) {
+            const stream = env.stream || Array.isArray(env.chunks);
+            return { text: stream ? text : JSON.stringify(env.result ?? { error: env.error, status: env.status }, null, 2),
+                type: stream ? 'text/event-stream' : 'application/json', extension: stream ? 'sse.txt' : 'json',
+                status: env.status, error: env.error };
+        }
+        await waitForPoll(2000);
+    }
+    throw new Error('找回任务超过等待期限；可稍后重新查询');
+}
+
+function envelopeToResponse(env) {
+    const success = env.status === 'completed';
+    const upstreamCode = env.status_code;
+    const status = success ? 200 : env.status === 'cancelled' ? 499
+        : Number.isInteger(upstreamCode) && upstreamCode >= 400 && upstreamCode <= 599 ? upstreamCode : 502;
+    return new Response(JSON.stringify(env.result ?? { error: { message: env.error || '任务 ' + env.status } }), {
+        status, headers: { 'Content-Type': 'application/json' },
+    });
+}
+async function runTaskAsResponse(data, signal) {
+    signal?.throwIfAborted();
+    const upstream = resolveUpstream(data);
+    const headers = resolveHeaders(data, upstream);
+    const body = extractOpenAIBody(data);
+    const deadline = Date.now() + POLL_MAX_MS;
+    const id = await submitTask(upstream, headers, body);
+    let finished = false, cancelStarted = false;
+    const stop = () => {
+        if (finished || cancelStarted) return;
+        cancelStarted = true;
+        cancelTask(upstream, headers, id).catch(error => reportStatus(error.message + '；任务 ' + id));
+    };
+    const dispose = () => signal?.removeEventListener('abort', stop);
+    signal?.addEventListener('abort', stop, { once: true });
+    if (signal?.aborted) { stop(); dispose(); signal.throwIfAborted(); }
+    reportStatus('任务已提交：' + id);
+    if (!body.stream) {
+        try {
+            while (Date.now() < deadline) {
+                const env = await pollTask(upstream, headers, id, 0, signal, deadline);
+                signal?.throwIfAborted();
+                if (env.done) {
+                    finished = true;
+                    reportStatus('任务 ' + env.status + '：' + id);
+                    return envelopeToResponse(env);
+                }
+                await waitForPoll(2000, signal);
+            }
+            throw new Error('任务超时：' + id);
+        } catch (error) {
+            if (Date.now() >= deadline) stop();
+            reportStatus(error.message + '；任务 ' + id);
+            throw error;
+        } finally { dispose(); }
+    }
     const encoder = new TextEncoder();
-
+    const local = new AbortController();
+    const streamSignal = signal ? AbortSignal.any([signal, local.signal]) : local.signal;
     const stream = new ReadableStream({
         async start(controller) {
-            const deadline = Date.now() + POLL_MAX_MINUTES * 60 * 1000;
-            let after = 0;
+            let after = 0, pending = '', doneOffset = -1;
             try {
-                let nextDelay = POLL_INTERVAL_MS;
                 while (Date.now() < deadline) {
-                    if (signal?.aborted) break;
-                    await new Promise(r => setTimeout(r, nextDelay));
-                    if (signal?.aborted) break;
-
-                    const env = await pollTask(upstream, apiKey, taskId, after);
-                    for (const chunk of (env.chunks ?? [])) {
-                        controller.enqueue(encoder.encode(chunk));
+                    const env = await pollTask(upstream, headers, id, after, streamSignal, deadline);
+                    streamSignal.throwIfAborted();
+                    const chunks = env.chunks ?? [];
+                    if (!Array.isArray(chunks) || chunks.some(chunk => typeof chunk !== 'string')
+                        || !Number.isInteger(env.next_after) || env.next_after !== after + chunks.length) {
+                        throw new Error('任务分片游标异常，已停止续取：' + id);
                     }
-                    after = env.next_after ?? after;
-
+                    pending += chunks.join('');
+                    const doneMatch = /(?:^|\n)data:\s*\[DONE\]\s*(?:\r?\n|$)/.exec(pending);
+                    doneOffset = doneMatch ? doneMatch.index : -1;
+                    // Hold the small tail, including a split [DONE], until task status is known.
+                    let cut = Math.min(Math.max(0, pending.length - 64), doneOffset < 0 ? Infinity : doneOffset);
+                    if (cut && /[\uD800-\uDBFF]/.test(pending[cut - 1])) cut--;
+                    if (cut) { controller.enqueue(encoder.encode(pending.slice(0, cut))); pending = pending.slice(cut); }
+                    if (doneOffset >= 0) doneOffset -= cut;
+                    after = env.next_after;
                     if (env.done) {
-                        const joined = (env.chunks ?? []).join('');
-                        // failed 且无错误帧时补一帧让 ST 弹 toast
-                        if (env.status === 'failed' && env.error && !joined.includes('"error"')) {
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: env.error, code: env.status_code ?? 502 } })}\n\n`));
+                        finished = true;
+                        if (env.status !== 'completed') {
+                            throw new Error(env.error || env.result?.error?.message || '任务 ' + env.status + '（HTTP ' + (env.status_code ?? 502) + '）');
                         }
-                        if (env.status === 'cancelled' && !joined.includes('"error"')) {
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: '任务已取消', code: 499 } })}\n\n`));
-                        }
-                        // 上游 SSE 缺 [DONE] 时补齐(ST 靠它结束流)
-                        if (!joined.includes('[DONE]')) {
-                            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-                        }
+                        if (doneOffset < 0) throw new Error('任务已结束但 SSE 缺少 [DONE]，未伪造完整结束标记');
+                        controller.enqueue(encoder.encode(pending));
+                        pending = '';
+                        reportStatus('任务完成：' + id);
                         break;
                     }
-                    // 有新分片 → 快速跟进(准流式);否则常规节奏
-                    nextDelay = (env.chunks?.length ?? 0) > 0 ? BUSY_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+                    await waitForPoll(chunks.length ? 500 : 2000, streamSignal);
                 }
-                if (Date.now() >= deadline && !signal?.aborted) {
-                    await cancelTask(upstream, apiKey, taskId);
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: `任务 ${taskId} 超时(${POLL_MAX_MINUTES} 分钟)`, code: 504 } })}\n\n`));
-                    controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                if (!finished) throw new Error('任务超时：' + id);
+            } catch (error) {
+                if (Date.now() >= deadline) stop();
+                if (!local.signal.aborted) {
+                    const partial = doneOffset < 0 ? pending : pending.slice(0, doneOffset);
+                    if (partial) controller.enqueue(encoder.encode(partial));
+                    // Never fabricate [DONE] for a failed or truncated response.
+                    controller.enqueue(encoder.encode('\n\ndata: ' + JSON.stringify({
+                        error: { message: error.message || '请求已停止', task_id: id },
+                    }) + '\n\n'));
                 }
-            } catch (err) {
-                try {
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: { message: err.message ?? String(err), code: err.statusCode ?? 502 } })}\n\n`));
-                    controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-                } catch {
-                    // controller 已关闭
-                }
+                reportStatus((error.message || '请求已停止') + '；任务 ' + id);
             } finally {
-                try { controller.close(); } catch { /* already closed */ }
+                dispose();
+                if (!local.signal.aborted) controller.close();
             }
         },
-        cancel() {
-            // ST 侧取消(停止按钮/断开):取消任务,不浪费上游额度
-            cancelTask(upstream, apiKey, taskId);
-        },
+        cancel() { local.abort(); stop(); dispose(); },
     });
-
-    return new Response(stream, {
-        status: 200,
-        headers: {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-        },
-    });
+    return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
 }
-
-/** 把 catiecli 任务跑成一个伪 Response(SSE 流或 JSON),接口与 ST 期望一致 */
-async function runTaskAsResponse(generateData, signal) {
-    const upstream = resolveUpstream(generateData);
-    const apiKey = await resolveApiKey();
-    const requestBody = extractOpenAIBody(generateData);
-
-    const taskId = await submitTask(upstream, apiKey, requestBody);
-    console.info(`[st-catiecli-tasks] 任务已提交: ${taskId}(stream=${requestBody.stream})`);
-
-    if (!requestBody.stream) {
-        // 非流式:轮询到终态,返回伪 JSON Response
-        const deadline = Date.now() + POLL_MAX_MINUTES * 60 * 1000;
-        let after = 0;
-        let env = null;
-        while (Date.now() < deadline) {
-            if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
-            await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-            env = await pollTask(upstream, apiKey, taskId, after);
-            after = env.next_after ?? after;
-            if (env.done) break;
-            env = null;
-        }
-        if (!env) {
-            await cancelTask(upstream, apiKey, taskId);
-            throw Object.assign(new Error(`任务 ${taskId} 超过 ${POLL_MAX_MINUTES} 分钟未完成`), { statusCode: 504 });
-        }
-        return envelopeToResponse(env);
-    }
-
-    return streamTaskResponse(upstream, apiKey, taskId, signal);
-}
-
 function installFetchPatch() {
     if (patched) return;
     patched = true;
     window.fetch = async function (input, init) {
-        const url = typeof input === 'string' ? input : input?.url ?? '';
-        if (url.includes(GENERATE_URL) && init?.method?.toUpperCase() === 'POST' && init?.body) {
-            try {
-                const generateData = JSON.parse(init.body);
-                if (shouldIntercept(generateData)) {
-                    console.info('[st-catiecli-tasks] 接管生成请求 →', generateData.model);
-                    return await runTaskAsResponse(generateData, init.signal ?? null);
-                }
-            } catch (err) {
-                if (err instanceof DOMException && err.name === 'AbortError') throw err;
-                // 拦截失败(缺密钥/JSON 问题):透传原始请求并提示
-                console.error('[st-catiecli-tasks] 接管失败,回退 ST 原生请求:', err);
-                if (typeof toastr !== 'undefined') {
-                    toastr.warning(`Catiecli Tasks 接管失败: ${err.message}`, '已回退直连模式');
-                }
-            }
+        const url = new URL(input instanceof Request ? input.url : input, window.location.href);
+        if (url.origin !== window.location.origin || url.pathname !== GENERATE_URL || !getSettings().enabled) {
+            return originalFetch(input, init);
         }
-        return originalFetch.call(this, input, init);
+        const request = new Request(input instanceof Request ? input.clone() : url, init);
+        if (request.method !== 'POST') return originalFetch(input, init);
+        const data = await request.clone().json();
+        if (!shouldIntercept(data)) return originalFetch(input, init);
+        try { return await runTaskAsResponse(data, request.signal); }
+        catch (error) {
+            reportStatus(error.message);
+            // No native-generation fallback after submission, including uncertain POST results.
+            throw error;
+        }
     };
-    console.info('[st-catiecli-tasks] fetch 拦截已安装(仅接管 Custom 源生成请求)');
-}
-
-function uninstallFetchPatch() {
-    if (!patched) return;
-    window.fetch = originalFetch;
-    patched = false;
 }
 
 // ===== 扩展 UI(设置面板) =====
@@ -360,19 +335,55 @@ function uninstallFetchPatch() {
 async function addSettingsPanel() {
     // 第三方扩展模板路径需带 third-party/ 前缀(静态挂载在
     // /scripts/extensions/third-party/* 下)
-    const html = await renderExtensionTemplateAsync('third-party/st-catiecli-tasks', 'settings', {});
+    const folder = decodeURIComponent(new URL('.', import.meta.url).pathname).match(/\/third-party\/([^/]+)\//)?.[1];
+    if (!folder) throw new Error('无法确定插件安装目录');
+    const html = await renderExtensionTemplateAsync('third-party/' + folder, 'settings', {});
     $('#extensions_settings2').append(html);
 
     const s = getSettings();
+    $('#catiecli_tasks_upstream').val(s.upstreamOverride);
+
+    document.getElementById('catiecli_tasks_recover').addEventListener('click', async function () {
+        this.disabled = true;
+        const list = document.getElementById('catiecli_tasks_list');
+        for (const link of list.querySelectorAll('a[download]')) URL.revokeObjectURL(link.href);
+        list.replaceChildren();
+        try {
+            const { upstream, headers } = recoveryConnection();
+            const tasks = await listTasks(upstream, headers);
+            if (!tasks.length) list.textContent = '此密钥暂无未过期任务。';
+            for (const task of tasks) {
+                const row = document.createElement('div');
+                const label = document.createElement('p');
+                const created = task.created_at ? new Date(task.created_at * 1000).toLocaleString() : '';
+                label.textContent = [task.model, task.status, created, task.id].filter(Boolean).join(' · ');
+                const button = document.createElement('button');
+                button.type = 'button'; button.className = 'menu_button'; button.textContent = '读取结果';
+                button.addEventListener('click', async () => {
+                    button.disabled = true;
+                    try {
+                        const result = await readTaskResult(upstream, headers, task.id,
+                            status => { button.textContent = '读取中：' + status; });
+                        const link = document.createElement('a');
+                        link.textContent = '下载结果（' + result.status + '）';
+                        link.download = task.id + '.' + result.extension;
+                        link.href = URL.createObjectURL(new Blob([result.text], { type: result.type }));
+                        button.replaceWith(link);
+                        if (result.error) label.textContent += ' · ' + result.error;
+                    } catch (error) {
+                        button.disabled = false; button.textContent = '重新读取';
+                        reportStatus(error.message);
+                    }
+                });
+                row.append(label, button); list.append(row);
+            }
+        } catch (error) { reportStatus(error.message); }
+        finally { this.disabled = false; }
+    });
 
     // 一键切换接管(标题栏内的开关)
     $('#catiecli_tasks_enabled').prop('checked', s.enabled).on('change', function () {
         s.enabled = $(this).prop('checked');
-        if (s.enabled) {
-            installFetchPatch();
-        } else {
-            uninstallFetchPatch();
-        }
         saveSettingsDebounced();
         toastr.info(s.enabled ? '已开启任务 API 接管' : '已关闭接管,恢复 ST 原生直连', 'Catiecli Tasks');
     });
@@ -431,11 +442,13 @@ async function addSettingsPanel() {
 
 // ===== 入口 =====
 
-export async function init() {
-    loadSettings();
-    await addSettingsPanel();
-    if (getSettings().enabled) {
-        installFetchPatch();
-    }
-    console.info('[st-catiecli-tasks] Catiecli Tasks 扩展已加载(任务 API 接管模式)');
+let initialization;
+export function init() {
+    return initialization ??= addSettingsPanel();
 }
+loadSettings();
+installFetchPatch();
+jQuery(() => init().catch(error => {
+    console.error('[Catiecli Tasks] 初始化失败', error);
+    toastr.error(error.message, 'Catiecli Tasks');
+}));

@@ -1,13 +1,13 @@
 {
-    "display_name": "Catiecli Tasks",
+    "display_name": "Catiecli Tasks · TRANS-AM 兼容版",
     "loading_order": 10,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "author": "sukaka",
-    "version": "1.2.0",
-    "homePage": "https://github.com/su-kaka/st-catiecli-tasks",
+    "author": "sukaka; compatibility fork by Jackieji00",
+    "version": "1.3.0",
+    "homePage": "https://github.com/Jackieji00/st-catiecli-tasks",
     "hooks": {
         "activate": "init"
     }

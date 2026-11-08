@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "test": "node tests/transport.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.0",
+    "yaml": "^2.8.1"
+  }
+}

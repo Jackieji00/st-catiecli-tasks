@@ -1,73 +1,69 @@
-# st-catiecli-tasks
+# Catiecli Tasks · TRANS-AM 兼容版
 
-SillyTavern **UI 扩展**:把 [catiecli-neo](https://github.com/su-kaka/catiecli-neo)
-的**任务 API**(`POST /v1/openai/tasks` 提交 → `GET .../tasks/{id}?after=N`
-轮询分片)接到 SillyTavern 的 Chat Completion 生成链路上,**根治长连接网络
-不稳定**:断网、切后台、换 WiFi 不再报废整个回复。
+SillyTavern 前端扩展。基于 [su-kaka/st-catiecli-tasks](https://github.com/su-kaka/st-catiecli-tasks) v1.2.0，保留其后台任务 API，将本仓库作为独立安装来源。当前版本：**1.3.0**。
 
-> 形态:纯前端 UI 扩展(**Extensions 贴 git 链接即装**,无需改 config.yaml、
-> 无需服务端插件)。生成请求由浏览器直接调 catiecli(catiecli 全站 CORS
-> 放行),ST 原生流式解析照常工作。
+## 安装
 
-## 为什么需要它
+在 SillyTavern 的「扩展 → 安装扩展」中填写：
 
-长回复/长思考请求动辄几分钟,客户端必须保持长连接;手机切后台、网络抖动
-都会断开连接,整个回复作废。本扩展把生成请求改为**提交-轮询**模式:
-
-```
-ST 前端 ──patch fetch 拦截 /api/backends/chat-completions/generate
-        └─ 浏览器直连 catiecli:
-           POST /v1/openai/tasks                 提交任务(秒回 task_id)
-           GET  /v1/openai/tasks/{id}?after=N   轮询增量分片
-        └─ 分片原样推进伪 SSE Response → ST 原生 SSE 解析器照常打字机
+```text
+https://github.com/Jackieji00/st-catiecli-tasks
 ```
 
-- 断网:提交/轮询自动重试 3 次(指数退避),3 次都连不上才报错;
-  任务在 catiecli 服务端继续执行,分片存 Redis 不丢
-- ST 停止按钮:扩展对任务发 cancel,不浪费上游额度
+安装或更新后刷新整个酒馆页面。默认关闭接管，在插件面板填写密钥、保存并开启。
 
-## 安装(Extensions 贴链接)
+已经安装原版时，请备份插件配置后替换为此 fork，或由部署者将原扩展的 Git 远程改为本仓库。**不要同时启用原版与兼容版。**本仓库保留原设置命名空间。云酒馆须允许安装第三方扩展；禁止安装的平台需要管理员处理。无需导入修改版预设。
 
-SillyTavern → **Extensions(扩展)** 面板 → `Install extension` 填:
+## 配置与使用
 
+- 主聊天仍在酒馆中选择 **Chat Completion → Custom (OpenAI-compatible)**，设置猫站连接及模型；插件不会替你切换主聊天连接。
+- 猫站标准 API 基础地址是 `https://catiecli.sukaka.top/v1`。插件面板默认认这个地址，正常使用只需填写 `cat-` 密钥，不必再填网址。
+- 独立大总结继续使用原预设的配置。它可以跟随主 API，也可以使用独立连接、模型和密钥；本插件不改写总结提示词、世界书或聊天。
+- 本次请求明确带有 Authorization 时优先使用；其次使用本次独立连接的密钥。只有本次请求没有独立凭据、且地址与「插件密钥所属地址」一致时，才使用插件密钥。
+- 其他 API、Gemini 原生请求仍走酒馆原有链路。选择 Gemini 模型的 OpenAI 兼容请求可以走任务 API；这不代表支持 Gemini 原生协议的后台任务。
+- 面板状态会显示当前处理情况和任务 ID，不显示密钥或聊天内容。密钥沿用原版的酒馆扩展设置存储方式。
+
+## 与原版 1.2.0 的区别
+
+| 项目 | 本 fork 的处理 |
+| --- | --- |
+| 按请求地址分流 | 继承原版已有功能，没有把它算作新增 |
+| 独立总结凭据 | 优先使用该请求的凭据，避免统一使用插件密钥 |
+| 开关与预设处理链 | 加载时一次性安装底层传输，开关只改变接管状态，不恢复旧 fetch 覆盖预设处理器 |
+| TRANS-AM 加载顺序 | 扩展加载顺序为 10，早于酒馆助手；检测到已加载的 TRANS-AM 处理器时先保留直连，并提示刷新 |
+| 请求参数 | 保留 tools、tool_choice、扩展请求体、排除字段、JSON schema 及自定义请求头 |
+| 提交重试 | 插件只发起一次 POST 调用；结果不明时不主动重提、不回退为一次新的普通生成 |
+| 断线续取 | 网络恢复后继续 GET 同一个任务及游标，在本次运行的 30 分钟期限内重试；查询临时返回 408/429/500/502/503/504 也继续等待 |
+| 网页重载后找回 | 面板查询现有任务列表并读取、下载结果，不重新生成、不自动改写聊天 |
+| 异常流 | 不伪造缺失的 [DONE]；终态失败也不会先给宿主发送正常结束标记 |
+| 停止 | 调用方 AbortSignal 或取消读取触发任务取消；提交过程中停止时，拿到任务 ID 后再取消 |
+| 标准酒馆初始化 | 同时支持模块加载初始化与宿主 activate 钩子，防止重复创建面板 |
+
+任务返回的工具调用和文本仍交给原有上层处理器。因此 TRANS-AM 的工具正文校验、还原及显示逻辑继续由预设负责，插件不自行往聊天里插入消息。
+
+## 已知范围
+
+- **切后台或断网后页面还在：自动续取同一任务。页面重载或被系统回收：在插件面板展开「找回后台任务」，刷新列表并读取、下载结果。**找回使用面板当前密钥及其所属地址；使用另一把独立密钥生成的任务，需要换成对应密钥查询。任务需尚未过期。
+- 找回下载保留完整原始 SSE 或 JSON，不自动插回聊天，也不重建已经丢失的预设运行状态。失败、取消任务的已有分片也可取走，下载标签显示其状态。
+- 轮询断网不重新生成。POST 响应丢失时可能已创建任务，先用「找回后台任务」核对，避免手动重复提交。插件不会主动重提；浏览器网络层仍可能自行重传网络请求。
+- 使用了酒馆的「提示词后处理」时，本版本保留原始酒馆直连，并在状态栏说明；该请求不会获得后台任务续取能力。这避免跳过后端转换。
+- 需要支持 `AbortSignal.timeout`、`AbortSignal.any` 的现代浏览器，以及酒馆自带的 YAML 库。猫站的跨域、配额和任务保留期限仍由站点决定。
+- 大总结自己的「打断」按钮是否立即中止网络，取决于预设是否发出 AbortSignal；仅设置“下一检查点停止”的按钮仍保持原行为。
+- 非标准音视频转换、各云平台定制版、手机原生宿主和所有第三方扩展组合尚未逐一验收。
+- `server/` 是上游保留的可选后端插件，未在本次前端兼容修改中升级或验证；本页的兼容说明针对前端扩展。
+
+## 本地验证
+
+测试使用真实浏览器、原生 Fetch/ReadableStream 和本机 HTTP 服务中的合成任务，不使用真实猫站密钥、聊天或付费生成。覆盖工具调用分片、中文与 emoji、部分输出后断网与页面冻结/恢复、查询 503 重试、新页面从任务列表找回、独立密钥与 YAML 参数、失败/缺结束标记、避免重复提交、取消、开关时保留上层包装器、Request 对象和加载顺序保护。
+
+```sh
+npm install
+npx playwright install chromium
+npm test
 ```
-https://github.com/su-kaka/st-catiecli-tasks
-```
 
-装完在扩展列表勾选启用 **Catiecli Tasks**。
+也可设置 `BROWSER_CHANNEL=msedge` 使用已有 Edge。仓库测试仅需开发依赖；用户安装扩展不需要运行 npm。测试结果不等同于真实模型效果或所有预设功能的端到端验收。
 
-## 配置(一次)
+## 来源与许可
 
-1. API 选 **Chat Completion** → 源选 **Custom (OpenAI-compatible)**
-2. **Custom Endpoint** 填 catiecli 地址:
-
-```
-https://catiecli.sukaka.top/v1
-```
-
-3. 点 🔑 → API 密钥(`api_key_custom`)填 catiecli 的 `cat-` 密钥
-   —— **扩展直接复用该密钥,无需另填**
-4. 点 **连接**(ST 后端直连 catiecli `/v1/models`,标准协议兼容)
-   → 选模型 → 生成
-
-扩展面板(Extensions 设置区)里:
-- **接管开关**:默认开;关闭则完全回退 ST 原生直连
-- **上游地址**:留空跟随 Custom Endpoint;也可强制指定
-- **测试连接**:验证扩展 → catiecli 连通性(显示可用模型数)
-
-**逐请求判定**:每次生成请求都看请求体自带的地址 —— 命中**接管关键词**
-(高级设置里可改,默认 `catiecli`,正则语法)就接管,不命中就不拦截;
-换用其他 API、或第三方插件带自己 URL 的请求自动直连,不会被误接管。
-
-## 使用体验
-
-与直连 Custom 源**完全一致**:流式打字机(有新分片时 60ms 快速跟进)、
-非流式、预设、模型选择全部照常;区别只是底层走任务 API,网络再抖也
-不丢回复。单任务最长 30 分钟,超时自动取消并提示。
-
-## `server/` 子目录(可选的服务端插件形态)
-
-不想用浏览器直连(例如 ST 部署在无外网出口的机器)时,可用
-[server/](./server) 下的服务端插件形态:把它放进 SillyTavern 的
-`plugins/` 目录并在 `config.yaml` 设 `enableServerPlugins: true`,
-Custom Endpoint 改指插件地址。两种形态二选一即可。
+原作者：sukaka；原项目：[su-kaka/st-catiecli-tasks](https://github.com/su-kaka/st-catiecli-tasks)。本 fork 由 Jackieji00 维护兼容改动，保留原作者 MIT 许可与版权声明，详见 [LICENSE](./LICENSE)。
