@@ -65,6 +65,10 @@ const server = http.createServer(async (req, res) => {
             if (task.body.model === 'unavailable' && !task.failures++) {
                 res.writeHead(503).end(); return;
             }
+            if (task.body.model === 'poll-json-cut' && !task.failures++) {
+                res.setHeader('Content-Type', 'application/json');
+                res.end('{"status":"running"'); return;
+            }
             let env;
             if (task.body.model === 'waiting' || task.body.model === 'stop-submit') {
                 env = { status: 'running', done: false, chunks: [], next_after: after };
@@ -121,6 +125,12 @@ try {
     const unavailable = await page.evaluate(async () => (await send(makeBody('unavailable'))).text());
     assert.equal(unavailable, rawSse);
     assert.equal(posts.filter(p => p.body.model === 'unavailable').length, 1);
+    for (const stream of [false, true]) {
+        const result = await page.evaluate(async stream => (await send(makeBody('poll-json-cut', stream))).text(), stream);
+        if (stream) assert.equal(result, rawSse);
+        else assert.equal(JSON.parse(result).choices[0].message.content, '{"events":[]}');
+    }
+    assert.equal(posts.filter(p => p.body.model === 'poll-json-cut').length, 2, 'One submission per generation despite malformed poll JSON');
     // Drop the real browser network after a successful partial response, then freeze/resume the page.
     const firstChunk = page.waitForResponse(response => response.url().includes('/v1/openai/tasks/') &&
         response.url().endsWith('?after=0'));

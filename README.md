@@ -1,6 +1,12 @@
 # Catiecli Tasks · TRANS-AM 兼容版
 
-SillyTavern 前端扩展。基于 [su-kaka/st-catiecli-tasks](https://github.com/su-kaka/st-catiecli-tasks) v1.2.0，保留其后台任务 API，将本仓库作为独立安装来源。当前版本：**1.3.0**。
+SillyTavern 前端扩展。基于 [su-kaka/st-catiecli-tasks](https://github.com/su-kaka/st-catiecli-tasks) v1.2.0，保留其后台任务 API，将本仓库作为独立安装来源。当前版本：**1.3.1**。
+
+## 1.3.1 修复
+
+任务查询返回 HTTP 200 但 JSON 不完整或无效时，继续 GET 同一个任务与游标，沿用原来的取消信号及 30 分钟期限。不会重新 POST，不会回退直连，不会把损坏的查询响应当作模型正文。1.3.0 会在此处直接抛出 SyntaxError，导致后台任务还在运行而前端停止。
+
+此缺陷已用本机 HTTP 服务和真实浏览器复现；修复后流式与非流式检查通过，且在原生酒馆 1.19.0 + 酒馆助手 4.11.3 + 预设 v1.1.0.11 中验证损坏查询 JSON 后只提交一次、最终生成一个回复楼层。尚无用户当次失败的浏览器异常，不能断定 139 秒那次故障必然由此引起。预设保持 v1.1.0.11。
 
 ## 安装
 

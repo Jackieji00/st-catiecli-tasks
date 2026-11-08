@@ -159,8 +159,8 @@ async function pollTask(upstream, headers, id, after, signal, deadline) {
             return await response.json();
         } catch (error) {
             signal?.throwIfAborted();
-            if (!(error instanceof TypeError) && error.name !== 'TimeoutError') throw error;
-            reportStatus('网络暂不可用，继续等待同一个任务：' + id);
+            if (!(error instanceof TypeError) && !(error instanceof SyntaxError) && error.name !== 'TimeoutError') throw error;
+            reportStatus((error instanceof SyntaxError ? '任务查询返回的 JSON 不完整或无效，继续读取同一个任务：' : '网络暂不可用，继续等待同一个任务：') + id);
             await waitForPoll(Math.min(2000, Math.max(0, deadline - Date.now())), signal);
         }
     }
