@@ -31,7 +31,7 @@
 import express from 'express';
 
 /** 默认上游：内置线上部署 */
-const DEFAULT_CATIECLI_URL = 'https://catiecli.sukaka.top';
+const DEFAULT_CATIECLI_URL = 'https://catiecli-cdn.sukaka.top';
 
 /** 从请求头解析上游地址（X-Catiecli-Url），没有时用默认线上地址 */
 function upstreamFromRequest(req) {
